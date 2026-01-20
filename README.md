@@ -1,1 +1,1 @@
-# extended-trading-bot
+# Extended-Trading-Bot
