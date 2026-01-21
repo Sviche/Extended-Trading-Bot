@@ -17,68 +17,68 @@ cd Extended-Trading-Bot
 pip install -r requirements.txt
 ```
 
-Или используйте готовый скрипт:
+Or use the ready-made script:
 ```bash
 setup.bat  # Windows
 ```
 
 ## Step 3: Configuration
 
-### 3.1 Создайте файл с приватными ключами
-Создайте файл `user_data/private_keys.txt` и добавьте ваши Ethereum приватные ключи (один на строку):
+### 3.1 Add Your Private Keys
+Open the file `user_data/private_keys.txt` and add your Ethereum private keys (one per line):
 ```
 0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef
 0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890
 ```
 
-Формат смотрите в `user_data/private_keys.example.txt`
+**Note:** The file is already created in the repository, just add your keys.
 
-### 3.2 Создайте файл с прокси
-Создайте файл `user_data/proxies.txt` и добавьте ваши прокси (один на строку):
+### 3.2 Add Your Proxies
+Open the file `user_data/proxies.txt` and add your proxies (one per line):
 ```
 http://user:password@1.2.3.4:8080
 socks5://user:password@5.6.7.8:1080
 ```
 
-Формат смотрите в `user_data/proxies.example.txt`
+**Note:** The file is already created in the repository, just add your proxies.
 
-### 3.3 Настройте параметры торговли (опционально)
-Отредактируйте `settings.py` если нужно изменить:
-- Рынки для торговли (`markets`)
-- Размер пачки (`batch_size_usd`)
-- Режим ордеров (`order_mode`: LIMIT или MARKET)
-- Другие параметры
+### 3.3 Configure Trading Parameters (Optional)
+Edit `settings.py` if you need to change:
+- Trading markets (`markets`)
+- Batch size (`batch_size_usd`)
+- Order mode (`order_mode`: LIMIT or MARKET)
+- Other parameters
 
 ## Step 4: Run
 ```bash
 python main.py
 ```
 
-Или используйте готовый скрипт:
+Or use the ready-made script:
 ```bash
 start.bat  # Windows
 ```
 
-При первом запуске произойдет:
-1. Автоматическая синхронизация ключей с БД
-2. Автоматический onboarding новых аккаунтов на Extended Protocol
-3. Создание API ключей программно
-4. Применение реферального кода
-5. Старт торговли
+On first run, the following will happen automatically:
+1. Automatic key synchronization with database
+2. Automatic onboarding of new accounts on Extended Protocol
+3. Programmatic API key creation
+4. Referral code application
+5. Trading starts
 
 ## Troubleshooting
 
-### Ошибка "Module not found"
-Убедитесь что установлены все зависимости:
+### "Module not found" Error
+Make sure all dependencies are installed:
 ```bash
 pip install -r requirements.txt --upgrade
 ```
 
-### Ошибка "Invalid private key format"
-Приватные ключи должны быть в формате `0x...` (66 символов). Проверьте файл `user_data/private_keys.txt`.
+### "Invalid private key format" Error
+Private keys must be in `0x...` format (66 characters). Check the `user_data/private_keys.txt` file.
 
-### Ошибка "Proxy connection failed"
-Проверьте формат прокси в `user_data/proxies.txt`. Убедитесь что прокси рабочие.
+### "Proxy connection failed" Error
+Check the proxy format in `user_data/proxies.txt`. Make sure the proxies are working.
 
-### Остальные вопросы
-Проверьте локальную документацию в папке `docs/` (доступна только после клонирования репозитория).
+### Other Questions
+Join our Telegram chat for support: https://t.me/Sviche_Crypto_Chat

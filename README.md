@@ -84,7 +84,7 @@ python main.py
 ## 📖 Documentation
 
 - 📦 [**Installation Guide**](INSTALL.md) — detailed installation instructions
-- 📚 Additional documentation available locally in the `docs/` folder (after cloning)
+- 💬 For questions and support, join our [Telegram Chat](https://t.me/Sviche_Crypto_Chat)
 
 ---
 
