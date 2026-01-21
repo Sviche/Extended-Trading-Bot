@@ -1,0 +1,23 @@
+# Extended Bot Dependencies
+
+# Extended SDK (latest version)
+x10-python-trading-starknet>=0.0.17
+
+# Core dependencies
+requests>=2.31.0
+aiohttp>=3.9.0
+websockets>=12.0  # WebSocket для real-time orderbook
+python-socks[asyncio]>=2.4.0  # Прокси для WebSocket подключений
+aiohttp-socks>=0.8.0  # Прокси для HTTP запросов через aiohttp
+
+# Ethereum
+eth-account>=0.11.0
+
+# Logging and utilities
+colorama>=0.4.6
+loguru>=0.7.2
+pyfiglet>=1.0.2
+qrcode>=7.4.2
+
+# Built-in (no install needed):
+# sqlite3, asyncio

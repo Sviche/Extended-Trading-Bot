@@ -1,0 +1,179 @@
+# Extended Bot - Git Ignore
+
+# ============================================================================
+# КРИТИЧЕСКИ ВАЖНО: Приватные ключи и credentials
+# ============================================================================
+# NOTE: private_keys.txt and proxies.txt are templates (empty files with instructions)
+# They are committed to GitHub as examples for users
+*.key
+*.pem
+
+# База данных с аккаунтами
+database/*.db
+database/*.db-journal
+database/*.sqlite
+database/*.sqlite3
+
+# Легаси JSON с аккаунтами
+user_data/accounts.json
+user_data/*.json
+
+# Резервные копии с credentials
+backups/*.db
+backups/*.json
+backups/*.key
+
+# Environment файлы
+.env
+.env.local
+.env.*.local
+
+# ============================================================================
+# Python
+# ============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath
+*.sage.py
+
+# Spyder
+.spyderproject
+.spyproject
+
+# Rope
+.ropeproject
+
+# mkdocs
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre
+.pyre/
+
+# ============================================================================
+# IDEs and Editors
+# ============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ============================================================================
+# Logs
+# ============================================================================
+logs/
+*.log
+
+# ============================================================================
+# Temporary files
+# ============================================================================
+tmp/
+temp/
+*.tmp
+tmpclaude-*
+nul
+
+# ============================================================================
+# OS
+# ============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ============================================================================
+# Project specific
+# ============================================================================
+# Тестовые файлы в корне (должны быть в tests/)
+/test_*.py
+/*_test.py
+/calculate_*.py
+/check_*.py
+/verify_*.py
+
+# Локальные конфиги
+local_settings.py
+settings_local.py
+
+# ============================================================================
+# Documentation (internal, not for GitHub)
+# ============================================================================
+docs/
+tests/
+CLAUDE.md
+
+# ============================================================================
+# Claude Code CLI (internal)
+# ============================================================================
+.claude/
+.clinerules
