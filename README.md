@@ -13,18 +13,18 @@
 
 ---
 
-## 📱 Join Our Community
-
-[![Telegram Channel](https://img.shields.io/badge/JOIN-TELEGRAM_CHANNEL-blue?style=for-the-badge&logo=telegram)](https://t.me/sviche_crypto)
-[![Telegram Chat](https://img.shields.io/badge/JOIN-TELEGRAM_CHAT-blue?style=for-the-badge&logo=telegram)](https://t.me/Sviche_Crypto_Chat)
-
----
-
 ## 🚀 Overview
 
 **Extended Bot** is a powerful tool for automated trading on Extended Protocol (StarkNet), designed for efficient management of large numbers of accounts with minimal effort.
 
 The bot uses batch account processing (batch trading) with automatic long/short position balancing to reduce risks and maximize profits.
+
+---
+
+## 📱 Join Our Community
+
+[![Telegram Channel](https://img.shields.io/badge/JOIN-TELEGRAM_CHANNEL-blue?style=for-the-badge&logo=telegram)](https://t.me/sviche_crypto)
+[![Telegram Chat](https://img.shields.io/badge/JOIN-TELEGRAM_CHAT-blue?style=for-the-badge&logo=telegram)](https://t.me/Sviche_Crypto_Chat)
 
 ---
 
