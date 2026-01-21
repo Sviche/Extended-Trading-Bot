@@ -9,9 +9,18 @@
 
 > Professional trading bot for Extended Protocol (StarkNet) with automatic account onboarding and hedge strategies
 
+**[🇷🇺 Русская версия](README_RU.md)**
+
 ---
 
-## 🚀 About the Project
+## 📱 Join Our Community
+
+[![Telegram Channel](https://img.shields.io/badge/JOIN-TELEGRAM_CHANNEL-blue?style=for-the-badge&logo=telegram)](https://t.me/sviche_crypto)
+[![Telegram Chat](https://img.shields.io/badge/JOIN-TELEGRAM_CHAT-blue?style=for-the-badge&logo=telegram)](https://t.me/Sviche_Crypto_Chat)
+
+---
+
+## 🚀 Overview
 
 **Extended Bot** is a powerful tool for automated trading on Extended Protocol (StarkNet), designed for efficient management of large numbers of accounts with minimal effort.
 
@@ -136,15 +145,6 @@ Accounts → Cooldown → Available
 - ✅ Proxies for request anonymization
 - ✅ Graceful Shutdown for safe termination
 - ✅ Automatic position closing on stop
-
----
-
-## 📱 Community
-
-Join our Telegram community:
-
-[![Telegram Channel](https://img.shields.io/badge/Join-Telegram_Channel-blue?style=for-the-badge&logo=telegram)](https://t.me/sviche_crypto)
-[![Telegram Chat](https://img.shields.io/badge/Join-Telegram_Chat-blue?style=for-the-badge&logo=telegram)](https://t.me/Sviche_Crypto_Chat)
 
 ---
 
