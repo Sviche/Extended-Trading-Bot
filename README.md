@@ -1,152 +1,163 @@
 # 🤖 Extended Bot
 
-![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)
-![Status](https://img.shields.io/badge/status-active-success.svg)
-![Platform](https://img.shields.io/badge/platform-StarkNet-purple.svg)
-![Trading](https://img.shields.io/badge/trading-automated-orange.svg)
+[![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Status](https://img.shields.io/badge/status-active-success.svg)](https://github.com/Sviche/Extended-Trading-Bot)
+[![Platform](https://img.shields.io/badge/platform-StarkNet-purple.svg)](https://starknet.io/)
+[![Trading](https://img.shields.io/badge/trading-automated-orange.svg)](https://extended.exchange/)
+[![Telegram Channel](https://img.shields.io/badge/Telegram-Channel-blue?logo=telegram)](https://t.me/sviche_crypto)
+[![Telegram Chat](https://img.shields.io/badge/Telegram-Chat-blue?logo=telegram)](https://t.me/Sviche_Crypto_Chat)
 
-> Профессиональный торговый бот для Extended Protocol (StarkNet) с автоматическим onboarding аккаунтов и hedge-стратегиями
-
----
-
-## 🚀 О проекте
-
-**Extended Bot** — это мощный инструмент для автоматизированной торговли на Extended Protocol (StarkNet), созданный для эффективного управления большим количеством аккаунтов с минимальными усилиями.
-
-Бот использует пакетную обработку аккаунтов (batch trading) с автоматической балансировкой лонг/шорт позиций для снижения рисков и максимизации прибыли.
+> Professional trading bot for Extended Protocol (StarkNet) with automatic account onboarding and hedge strategies
 
 ---
 
-## ✨ Ключевые преимущества
+## 🚀 About the Project
 
-- 🎯 **Hedge-стратегия** — автоматическая балансировка лонгов и шортов (сумма лонгов = сумма шортов)
-- ⚡ **Два режима торговли** — LIMIT (экономия 0.03% комиссии) и MARKET (быстрое исполнение)
-- 🔄 **Гибридная архитектура** — Pool + Queue + Workers для масштабирования до 100+ аккаунтов
-- 🛡️ **Автоматический onboarding** — регистрация аккаунтов через SDK одной командой
-- 📊 **Real-time данные** — WebSocket подключения для мгновенных цен (10ms обновления)
-- 🎮 **Graceful Shutdown** — безопасное завершение при Ctrl+C с автоматическим закрытием позиций
-- 💾 **SQLite база данных** — безопасное хранение credentials и статистики
-- 🔁 **Retry-логика** — автоматические повторы при сбоях (exponential backoff)
+**Extended Bot** is a powerful tool for automated trading on Extended Protocol (StarkNet), designed for efficient management of large numbers of accounts with minimal effort.
+
+The bot uses batch account processing (batch trading) with automatic long/short position balancing to reduce risks and maximize profits.
 
 ---
 
-## 🛠️ Основные возможности
+## ✨ Key Features
 
-### Торговые функции
-- ✅ Торговля пачками аккаунтов (5-7 аккаунтов в батче)
-- ✅ Лимитные ордера с адаптивным offset и retry-логикой (до 5 попыток)
-- ✅ Маркет-ордера через IOC для быстрого исполнения
-- ✅ Автоматическое управление позициями (TP/SL/время)
-- ✅ Поддержка 52+ торговых пар Extended Exchange
-
-### Масштабирование
-- ✅ Динамическое формирование батчей из пула аккаунтов
-- ✅ Балансировка нагрузки между аккаунтами (cooldown система)
-- ✅ Параллельная обработка через Worker Pool (3-5 воркеров)
-- ✅ Масштабирование до 100+ аккаунтов
-
-### Автоматизация
-- ✅ Автоматическая регистрация аккаунтов через SDK (программный onboarding)
-- ✅ Синхронизация приватных ключей с БД при старте
-- ✅ Автоматическое применение реферального кода
-- ✅ Автоматическое создание API ключей
+- 🎯 **Hedge Strategy** — automatic balancing of longs and shorts (sum of longs = sum of shorts)
+- ⚡ **Two Trading Modes** — LIMIT (saves 0.03% on fees) and MARKET (fast execution)
+- 🔄 **Hybrid Architecture** — Pool + Queue + Workers for scaling to 100+ accounts
+- 🛡️ **Automatic Onboarding** — account registration via SDK with a single command
+- 📊 **Real-time Data** — WebSocket connections for instant prices (10ms updates)
+- 🎮 **Graceful Shutdown** — safe termination on Ctrl+C with automatic position closing
+- 💾 **SQLite Database** — secure storage of credentials and statistics
+- 🔁 **Retry Logic** — automatic retries on failures (exponential backoff)
 
 ---
 
-## ⚙️ Быстрый старт
+## 🛠️ Core Capabilities
 
-### 1. Установка зависимостей
+### Trading Features
+- ✅ Batch trading (5-7 accounts per batch)
+- ✅ Limit orders with adaptive offset and retry logic (up to 5 attempts)
+- ✅ Market orders via IOC for fast execution
+- ✅ Automatic position management (TP/SL/time-based)
+- ✅ Support for 52+ trading pairs on Extended Exchange
+
+### Scalability
+- ✅ Dynamic batch formation from account pool
+- ✅ Load balancing between accounts (cooldown system)
+- ✅ Parallel processing via Worker Pool (3-5 workers)
+- ✅ Scaling to 100+ accounts
+
+### Automation
+- ✅ Automatic account registration via SDK (programmatic onboarding)
+- ✅ Private key synchronization with DB on startup
+- ✅ Automatic referral code application
+- ✅ Automatic API key creation
+
+---
+
+## ⚙️ Quick Start
+
+### 1. Install Dependencies
 ```bash
 pip install -r requirements.txt
-# или используйте setup.bat на Windows
+# or use setup.bat on Windows
 ```
 
-### 2. Настройка
-Создайте файлы конфигурации:
-- `user_data/private_keys.txt` — ваши Ethereum приватные ключи
-- `user_data/proxies.txt` — прокси для каждого аккаунта
-- Отредактируйте `settings.py` при необходимости
+### 2. Configuration
+Create configuration files:
+- `user_data/private_keys.txt` — your Ethereum private keys
+- `user_data/proxies.txt` — proxies for each account
+- Edit `settings.py` if needed
 
-### 3. Запуск
+### 3. Launch
 ```bash
 python main.py
-# или используйте start.bat на Windows
+# or use start.bat on Windows
 ```
 
-**Вот и всё!** При первом запуске произойдет автоматический onboarding всех аккаунтов, и бот начнет торговать.
+**That's it!** On first run, automatic onboarding of all accounts will occur, and the bot will start trading.
 
-> **Note:** Полная инструкция по установке доступна в [INSTALL.md](INSTALL.md)
-
----
-
-## 📖 Документация
-
-- 📦 [**Installation Guide**](INSTALL.md) — детальная инструкция по установке
-- 📚 Дополнительная документация доступна локально в папке `docs/` (после клонирования)
+> **Note:** Full installation guide available in [INSTALL.md](INSTALL.md)
 
 ---
 
-## 📋 Требования
+## 📖 Documentation
 
-- Python 3.10 или выше
-- Ethereum приватные ключи (для создания StarkNet аккаунтов)
-- HTTP/SOCKS5 прокси (один на аккаунт)
-- Минимум 5-7 аккаунтов для работы в batch режиме
+- 📦 [**Installation Guide**](INSTALL.md) — detailed installation instructions
+- 📚 Additional documentation available locally in the `docs/` folder (after cloning)
 
 ---
 
-## 🏗️ Архитектура
+## 📋 Requirements
+
+- Python 3.10 or higher
+- Ethereum private keys (to create StarkNet accounts)
+- HTTP/SOCKS5 proxies (one per account)
+- Minimum 5-7 accounts to work in batch mode
+
+---
+
+## 🏗️ Architecture
 
 ```
 Account Pool (100 accounts)
     ↓
-Batch Generator (создает задачи каждые 5s)
+Batch Generator (creates tasks every 5s)
     ↓
-Task Queue (буфер задач)
+Task Queue (task buffer)
     ↓
-Worker Pool (3-5 воркеров обрабатывают параллельно)
+Worker Pool (3-5 workers process in parallel)
     ↓
 Accounts → Cooldown → Available
 ```
 
-**Гибридный подход:** Pool + Queue + Workers для контролируемой нагрузки и масштабируемости.
+**Hybrid approach:** Pool + Queue + Workers for controlled load and scalability.
 
 ---
 
-## 💡 Экономика
+## 💡 Economics
 
-### LIMIT режим (по умолчанию)
-- Комиссия: **~0.02%** (Maker)
-- Скорость: ~100s на позицию
-- Экономия: **$30/день** при объеме $100k/день
+### LIMIT Mode (default)
+- Fee: **~0.02%** (Maker)
+- Speed: ~100s per position
+- Savings: **$30/day** at $100k/day volume
 
-### MARKET режим (быстрый фарм)
-- Комиссия: **~0.05%** (Taker)
-- Скорость: ~2s на позицию
-- Быстрее в **50-100 раз**
+### MARKET Mode (fast farming)
+- Fee: **~0.05%** (Taker)
+- Speed: ~2s per position
+- **50-100x faster**
 
 ---
 
-## 🔒 Безопасность
+## 🔒 Security
 
-- ✅ Приватные ключи хранятся локально (не в коде)
-- ✅ SQLite БД с credentials защищена на уровне ОС
-- ✅ Прокси для анонимизации запросов
-- ✅ Graceful Shutdown для безопасного завершения
-- ✅ Автоматическое закрытие позиций при остановке
+- ✅ Private keys stored locally (not in code)
+- ✅ SQLite DB with credentials protected at OS level
+- ✅ Proxies for request anonymization
+- ✅ Graceful Shutdown for safe termination
+- ✅ Automatic position closing on stop
+
+---
+
+## 📱 Community
+
+Join our Telegram community:
+
+[![Telegram Channel](https://img.shields.io/badge/Join-Telegram_Channel-blue?style=for-the-badge&logo=telegram)](https://t.me/sviche_crypto)
+[![Telegram Chat](https://img.shields.io/badge/Join-Telegram_Chat-blue?style=for-the-badge&logo=telegram)](https://t.me/Sviche_Crypto_Chat)
 
 ---
 
 ## ⚠️ Disclaimer
 
-Этот софт предоставляется "как есть" для образовательных целей. Торговля криптовалютами связана с рисками. Используйте на свой страх и риск.
+This software is provided "as is" for educational purposes. Cryptocurrency trading involves risks. Use at your own risk.
 
 ---
 
 ## 📄 License
 
-[Укажите вашу лицензию]
+MIT License
 
 ---
 
-<p align="center">Сделано с ❤️ для Extended Protocol community</p>
+<p align="center">Made with ❤️ for Extended Protocol community</p>
