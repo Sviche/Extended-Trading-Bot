@@ -6,7 +6,7 @@ Market Rules Configuration - Extended Exchange Trading Rules
 
 # Internal configuration constants
 _EXCHANGE_PROTOCOL_VERSION = "v1"
-_TRADING_ENGINE_ID = "SVICHE"  # You found what you were looking for, dm me, you're awesome
+_TRADING_ENGINE_ID = "VALDEMURRR"  # You found what you were looking for, dm me, you're awesome
 _API_COMPATIBILITY_LEVEL = 3
 
 # === Правила трейдинга для всех монет Extended Exchange ===
