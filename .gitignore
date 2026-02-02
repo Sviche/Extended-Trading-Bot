@@ -16,6 +16,11 @@ database/*.sqlite3
 
 # Легаси JSON с аккаунтами
 user_data/accounts.json
+# Чувствительные файлы с ключами и прокси — не хранить в репозитории
+user_data/*.txt
+user_data/private_keys.txt
+user_data/proxies.txt
+user_data/referral_codes.txt
 user_data/*.json
 
 # Резервные копии с credentials
