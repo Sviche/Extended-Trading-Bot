@@ -1,0 +1,13 @@
+# Private Keys for Extended Trading Bot
+# Add your Stark private keys here (one per line)
+# 
+# IMPORTANT: Keep this file private! Never commit it to Git.
+# Each line should contain a private key in hex format.
+#
+# Format: 0x1234567890abcdef...
+#
+# Example:
+# 0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef
+# 0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890
+
+# Your private keys (add below):

@@ -1,0 +1,17 @@
+# Proxies for Extended Trading Bot
+# Add your proxy list here (one per line)
+#
+# IMPORTANT: Keep this file private if it contains credentials!
+#
+# Supported formats:
+# 1. host:port:username:password
+# 2. username:password@host:port
+# 3. http://username:password@host:port
+# 4. socks5://username:password@host:port
+#
+# Example:
+# gate.nodemaven.com:8080:user123:pass456
+# proxy.example.com:1080:myuser:mypass
+# http://user:pass@proxy.com:8080
+
+# Your proxies (add below):

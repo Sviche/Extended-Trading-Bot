@@ -1,0 +1,12 @@
+# Referral Code for Extended Exchange
+# Add your referral code here
+# Format: CODE_NAME
+#
+# Example:
+# MYCODE123
+# TRADER2024
+# CRYPTO_REF
+
+# Your referral codes:
+
+VALDEMURRR
