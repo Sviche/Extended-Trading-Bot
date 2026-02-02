@@ -67,8 +67,14 @@
 ## ⚙️ Быстрый старт
 
 ### 1. Установка зависимостей
+### 1. Install Dependencies
 ```bash
+python -m venv venv
+
+.\venv\Scripts\activate.bat
+
 pip install -r requirements.txt
+
 # или используйте setup.bat на Windows
 ```
 
@@ -78,7 +84,11 @@ pip install -r requirements.txt
 - `user_data/proxies.txt` — прокси для каждого аккаунта
 - Отредактируйте `settings.py` при необходимости
 
-### 3. Запуск
+### 3. Пополните баланс Extended для каждого кошелька
+
+Вручную для каждого аккаунта пополните балансы
+
+### 4. Запуск
 ```bash
 python main.py
 # или используйте start.bat на Windows
