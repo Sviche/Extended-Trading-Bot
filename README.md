@@ -68,6 +68,10 @@ The bot uses batch account processing (batch trading) with automatic long/short 
 
 ### 1. Install Dependencies
 ```bash
+python -m venv venv
+
+.\venv\Scripts\activate.bat
+
 pip install -r requirements.txt
 # or use setup.bat on Windows
 ```
@@ -78,7 +82,11 @@ Create configuration files:
 - `user_data/proxies.txt` — proxies for each account
 - Edit `settings.py` if needed
 
-### 3. Launch
+### 3. Manual Deposit funds on accounts
+
+Manually top up each account before launching and specify the correct settings for your balance
+
+### 4. Launch
 ```bash
 python main.py
 # or use start.bat on Windows
