@@ -2,75 +2,71 @@
 Extended Bot - Settings and Configuration
 """
 
-# === Trading Settings ===
+# === Торговые настройки ===
 TRADING_SETTINGS = {
-    # Trading mode
-    'order_mode': 'MARKET',  # LIMIT or MARKET, LIMIT gives very few points
-    # LIMIT: Fee savings, slower, retry logic
-    # MARKET: Fast volume farming, instant execution, higher fees (~0.05%)
+    'markets': ['BTC', 'ETH'],  # Список монет для торговли (без -USD)
 
-    'markets': ['BTC', 'ETH'],  # List of coins to trade (without -USD)
+    # Настройки пачек аккаунтов
+    'batch_size_range': [3, 3],  # Диапазон количества аккаунтов в пачке [min, max]
+    'long_accounts_range': [1, 1],  # Количество лонг-аккаунтов в пачке [min, max]
+    # ВАЖНО: Количество шортов = total_accounts - long_accounts
+    # Пример: 6 аккаунтов, 2 лонга => 4 шорта (лонги ≠ шорты ✓)
 
-    # Account batch settings
-    'batch_size_range': [3, 3],  # Range of accounts per batch [min, max]
-    'long_accounts_range': [1, 1],  # Number of long accounts per batch [min, max]
-    # IMPORTANT: Number of shorts = total_accounts - long_accounts
-    # Example: 6 accounts, 2 longs => 4 shorts (longs ≠ shorts ✓)
+    'batch_size_usd': [300, 400],  # Диапазон размера ВСЕЙ ПАЧКИ в USD [min, max]
+    # Лонги делят между собой половину, шорты - вторую половину (для хеджирования)
+    # ВАЖНО: С учетом leverage 10x, для позиции $10 нужен маржин $1
+    # При batch_size=30: половина=15, лонг=15 (маржин $1.5), шорт=7.5 каждый (маржин $0.75)
+    # При batch_size=50: половина=25, лонг=25 (маржин $2.5), шорт=12.5 каждый (маржин $1.25)
 
-    'batch_size_usd': [1000, 1200],  # Range of TOTAL BATCH size in USD [min, max]
-    # Longs split half, shorts split the other half (for hedging)
-    # IMPORTANT: With 10x leverage, a $10 position requires $1 margin
-    # At batch_size=30: half=15, long=15 (margin $1.5), short=7.5 each (margin $0.75)
-    # At batch_size=50: half=25, long=25 (margin $2.5), short=12.5 each (margin $1.25)
-
-    # Order size randomization (anti-sybil)
-    'order_size_variation': [0.1, 0.4],  # Size deviation range from average [min, max]
-    # Example: batch_size=120, 2 longs, 3 shorts, variation=0.1-0.4
-    # Longs: $60 total → one ~$36, another ~$24 (20% deviation)
-    # Shorts: $60 total → $15, $20, $25 (different deviations)
-    # Sum of longs = sum of shorts = batch_size/2 ✓
+    # Рандомизация размеров ордеров (анти-сибил)
+    'order_size_variation': [0.1, 0.4],  # Диапазон отклонения размера от среднего [min, max]
+    # Пример: batch_size=120, 2 лонга, 3 шорта, variation=0.1-0.4
+    # Лонги: $60 всего → один ~$36, другой ~$24 (отклонение 20%)
+    # Шорты: $60 всего → $15, $20, $25 (разные отклонения)
+    # Сумма лонгов = сумма шортов = batch_size/2 ✓
 
     'leverage': {
         'BTC': 50,
         'ETH': 50,
-        'SOL': 15,
     },
 
-    # === LIMIT mode settings (only used when order_mode='LIMIT') ===
-    'limit_order_offset_percent': 0.0001,  # 0.01% from price for limit orders (LIMIT mode only)
-    'use_adaptive_offset': True,           # Auto-reduce offset if spread is narrow (LIMIT mode only)
+    # Тип ордеров
+    'order_type': 'MARKET',  # LIMIT (экономия 0.03% комиссии) или MARKET (быстрое исполнение)
 
-    # Timeouts and retry (LIMIT mode only)
-    'order_execution_timeout': 100,  # Wait for position open (sec) (LIMIT mode only)
-    'position_close_timeout': 100,   # Wait for position close (sec) (LIMIT mode only)
-    'max_open_retries': 5,           # Max attempts to open position (LIMIT mode only)
-    'max_close_retries': 5,          # Max attempts to close position (LIMIT mode only)
-    'max_batch_retries': 300,        # Max attempts to open entire batch on partial success (LIMIT mode only)
+    # Лимитные ордера (используются только если order_type='LIMIT')
+    'limit_order_offset_percent': 0.0001,  # 0.01% от цены для лимитных ордеров
+    'use_adaptive_offset': True,           # Автоматически уменьшать offset если спред узкий
 
-    # Workers
-    'num_workers': 1,                      # Number of parallel workers (3-5 optimal)
-    'account_cooldown_range': [60, 150],  # Account cooldown after trade [min, max] (sec)
-    'generation_interval': 5.0,            # Interval for creating new batches (seconds)
-    'max_queue_size': 10,                  # Maximum task queue size
-    'max_consecutive_errors': 5,           # Max consecutive errors before disabling account
+    # Таймауты
+    'order_execution_timeout': 100,  # Ждать открытия позиции (сек)
+    'position_close_timeout': 100,   # Ждать закрытия позиции (сек)
+    'max_open_retries': 5,           # Макс попыток открытия позиции
+    'max_close_retries': 5,          # Макс попыток закрытия позиции
+
+    # Воркеры
+    'num_workers': 1,                      # Количество параллельных воркеров (3-5 оптимально)
+    'account_cooldown_range': [60, 150],  # Время отдыха аккаунта после сделки [min, max] (сек)
+    'generation_interval': 5.0,            # Интервал создания новых батчей (секунды)
+    'max_queue_size': 10,                  # Максимальный размер очереди задач
+    'max_consecutive_errors': 5,           # Макс последовательных ошибок до отключения аккаунта
 }
 
-# === Position Management ===
+# === Управление позициями ===
 POSITION_MANAGEMENT = {
-    'holding_time_range': [60, 200],  # Position holding time [min, max] (sec)
-    'monitor_interval_sec': 200,      # Check positions every N sec
+    'holding_time_range': [60, 200],  # Время удержания позиции [min, max] (сек)
+    'monitor_interval_sec': 200,      # Проверка позиций каждые N сек
 }
 
-# === Delays ===
+# === Задержки ===
 DELAYS = {
-    'between_orders': [3, 5],    # Delay between orders [min, max] (sec)
-    'between_accounts': [3, 5],  # Delay between accounts [min, max] (sec)
-    'on_error': 60,              # Delay on error (sec)
+    'between_orders': [3, 5],    # Задержка между ордерами [min, max] (сек)
+    'between_accounts': [3, 5],  # Задержка между аккаунтами [min, max] (сек)
+    'on_error': 60,              # Задержка при ошибке (сек)
 }
 
-# === Logging ===
+# === Логирование ===
 LOG_SETTINGS = {
     'level': 'INFO',      # DEBUG, INFO, WARNING, ERROR
-    'file_max_mb': 100,   # Maximum log file size (MB)
-    'stats_interval_sec': 300,  # Orchestrator stats output interval (sec)
+    'file_max_mb': 100,   # Максимальный размер лог-файла (МБ)
+    'stats_interval_sec': 300,  # Интервал вывода статистики оркестратора (сек)
 }

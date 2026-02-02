@@ -18,7 +18,7 @@ import random
 import time
 import traceback
 from decimal import Decimal
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -166,21 +166,17 @@ class BatchTrader:
                 logger=self.logger
             )
 
-        # Провайдер маркет-данных (используем первый доступный прокси)
-        proxy = next((acc.proxy for acc in accounts if acc.proxy), None)
-        self.market_data = MarketDataProvider(testnet=testnet, proxy=proxy, logger=self.logger)
+        # Провайдер маркет-данных
+        self.market_data = MarketDataProvider(testnet=testnet, logger=self.logger)
 
         # WebSocket Manager для лимитных ордеров (опционально)
         self.ws_manager: Optional[ExtendedWebSocketManager] = None
         if LIMIT_ORDER_CONFIG['websocket_enabled']:
             # Формируем список рынков для WebSocket
             markets = [f"{m}-USD" for m in TRADING_SETTINGS['markets']]
-            # Извлекаем уникальные прокси из аккаунтов для WebSocket подключений
-            proxies = list(set(acc.proxy for acc in accounts if acc.proxy))
             self.ws_manager = ExtendedWebSocketManager(
                 markets=markets,
-                testnet=testnet,
-                proxies=proxies
+                testnet=testnet
             )
 
         # Активные пачки
@@ -300,83 +296,24 @@ class BatchTrader:
         )
         self.logger.info("=" * 60)
 
-        max_batch_retries = TRADING_SETTINGS.get('max_batch_retries', 3)
-        market_name = f"{batch.market}-USD"
+        try:
+            # Получаем leverage для рынка
+            leverage = TRADING_SETTINGS['leverage'].get(
+                batch.market,
+                TRADING_SETTINGS['leverage'].get('BTC', 10)
+            )
 
-        for attempt in range(1, max_batch_retries + 1):
-            try:
-                # Получаем leverage для рынка
-                leverage = TRADING_SETTINGS['leverage'].get(
-                    batch.market,
-                    TRADING_SETTINGS['leverage'].get('BTC', 10)
-                )
+            # Устанавливаем leverage для всех аккаунтов
+            await self._set_leverage_for_batch(batch, leverage)
 
-                # Устанавливаем leverage для всех аккаунтов
-                await self._set_leverage_for_batch(batch, leverage)
+            # Открываем позиции
+            await self._open_positions(batch)
 
-                # Открываем позиции
-                opened_accounts, failed_accounts = await self._open_positions(batch)
+            # Мониторим позиции
+            await self._monitor_positions(batch)
 
-                # Проверяем результат открытия
-                if failed_accounts:
-                    # Не все позиции открылись - несбалансированный батч
-                    self.logger.warning(
-                        f"⚠️ Батч несбалансирован: открыто {len(opened_accounts)}/{batch.total_accounts} позиций"
-                    )
-
-                    if opened_accounts:
-                        # Есть открытые позиции - нужно закрыть их
-                        self.logger.info(
-                            f"Закрытие {len(opened_accounts)} открытых позиций для балансировки..."
-                        )
-
-                        # Закрываем открытые позиции
-                        close_tasks = []
-                        for account in opened_accounts:
-                            close_tasks.append(
-                                self._close_position_by_account(
-                                    account=account,
-                                    market=market_name,
-                                    reason="несбалансированный батч"
-                                )
-                            )
-
-                        await asyncio.gather(*close_tasks, return_exceptions=True)
-
-                        self.logger.info(
-                            f"✓ Позиции закрыты для балансировки"
-                        )
-
-                    if attempt < max_batch_retries:
-                        self.logger.info(
-                            f"Повторная попытка открытия батча ({attempt}/{max_batch_retries})..."
-                        )
-                        # Задержка перед retry
-                        await asyncio.sleep(DELAYS.get('on_error', 60) / 2)
-                        continue
-                    else:
-                        self.logger.error(
-                            f"✗ Не удалось открыть все позиции батча после {max_batch_retries} попыток. "
-                            f"Батч пропущен."
-                        )
-                        return
-
-                # Все позиции открыты успешно - переходим к мониторингу
-                self.logger.info(
-                    f"✓ Все {len(opened_accounts)} позиций успешно открыты, начинаем мониторинг"
-                )
-
-                # Мониторим позиции
-                await self._monitor_positions(batch)
-                return  # Успешное завершение
-
-            except Exception as e:
-                self.logger.error(f"Ошибка торговли пачки: {e}")
-                if attempt < max_batch_retries:
-                    self.logger.info(f"Повторная попытка ({attempt}/{max_batch_retries})...")
-                    await asyncio.sleep(DELAYS.get('on_error', 60) / 2)
-                else:
-                    raise
+        except Exception as e:
+            self.logger.error(f"Ошибка торговли пачки: {e}")
 
     async def _set_leverage_for_batch(self, batch: AccountBatch, leverage: int):
         """Установить leverage для всех аккаунтов пачки"""
@@ -396,20 +333,10 @@ class BatchTrader:
         except Exception as e:
             self.logger.warning(f"Ошибка установки leverage: {e}")
 
-    async def _open_positions(self, batch: AccountBatch) -> tuple:
-        """
-        Открыть позиции для пачки
-
-        Returns:
-            tuple: (opened_accounts, failed_accounts) - списки успешно открытых и неуспешных аккаунтов
-        """
+    async def _open_positions(self, batch: AccountBatch):
+        """Открыть позиции для пачки"""
         market_name = f"{batch.market}-USD"
-        order_type = TRADING_SETTINGS.get('order_mode', 'LIMIT')  # LIMIT или MARKET из settings
-
-        # Валидация order_mode
-        if order_type not in ['LIMIT', 'MARKET']:
-            self.logger.warning(f"Invalid order_mode '{order_type}', using LIMIT")
-            order_type = 'LIMIT'
+        order_type = TRADING_SETTINGS.get('order_type', 'LIMIT')
 
         self.logger.info(
             f"\n{'='*60}\n"
@@ -500,7 +427,7 @@ class BatchTrader:
                     order_type=params['order_type']
                 )
             )
-            tasks.append((params['account'], task))
+            tasks.append(task)
 
             # Задержка между запуском ордеров (не ждём исполнения)
             if idx < len(accounts_to_open) - 1:
@@ -511,29 +438,26 @@ class BatchTrader:
         # Теперь ждём завершения всех tasks
         self.logger.info(f"Все {len(tasks)} ордеров запущены, ожидание исполнения...")
 
-        results = await asyncio.gather(*[t[1] for t in tasks], return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Собираем результаты с привязкой к аккаунтам
-        opened_accounts = []
-        failed_accounts = []
+        # Подсчитываем результаты
+        opened_count = 0
+        failed_count = 0
 
-        for (account, _), result in zip(tasks, results):
+        for result in results:
             if isinstance(result, Exception):
-                error_msg = f"{type(result).__name__}: {str(result)}"
-                self.logger.error(f"{account.name} | Ошибка открытия позиции: {error_msg}")
-                failed_accounts.append(account)
+                self.logger.error(f"Ошибка открытия позиции: {result}")
+                failed_count += 1
             else:
-                opened_accounts.append(account)
+                opened_count += 1
 
         # Итоговая статистика по открытию
         self.logger.info(
             f"\n{'─'*60}\n"
-            f"ИТОГО: открыто {len(opened_accounts)}/{len(tasks)} позиций"
-            + (f", неудачно: {len(failed_accounts)}" if failed_accounts else "") +
+            f"ИТОГО: открыто {opened_count}/{len(tasks)} позиций"
+            + (f", неудачно: {failed_count}" if failed_count > 0 else "") +
             f"\n{'─'*60}\n"
         )
-
-        return opened_accounts, failed_accounts
 
     async def _open_position(
         self,
@@ -575,25 +499,23 @@ class BatchTrader:
 
                 return
 
-            # === MARKET режим: быстрое исполнение ===
-            elif order_type == "MARKET":
-                # 1. Получить агрессивную цену через MarketDataProvider
-                price = await self.market_data.get_market_price_for_order(
-                    market=market,
-                    side=side,
-                    aggressive=True
-                )
+            # Для маркет-ордеров используем старую логику
+            # Получаем текущую цену
+            stats = await self.market_data.get_market_stats(market)
+            current_price = stats.mark_price
 
-                # 2. Конвертировать USD → amount
-                amount = size_usd / price
-                amount = round_to_min_size(amount, market)
+            # Конвертируем USD в количество базового актива
+            amount = size_usd / current_price
 
-                self.logger.info(
-                    f"{account.name}: открытие MARKET {side} позиции "
-                    f"{market} {amount} (~${size_usd:.2f})"
-                )
+            # Округляем до минимального размера для этого рынка
+            amount = round_to_min_size(amount, market)
 
-                # 3. Разместить маркет-ордер (1 попытка, IOC, агрессивная цена)
+            self.logger.info(
+                f"{account.name}: открытие {side} позиции "
+                f"{market} {amount} (~${size_usd})"
+            )
+
+            if order_type == "MARKET":
                 order = await client.place_market_order(
                     market=market,
                     side=side,
@@ -601,40 +523,113 @@ class BatchTrader:
                     market_data_provider=self.market_data,
                     reduce_only=False
                 )
+            else:  # LIMIT
+                # Для лимитного ордера используем текущую цену с небольшим offset
+                offset_pct = Decimal(str(
+                    TRADING_SETTINGS['limit_order_offset_percent']
+                ))
+                if side == "BUY":
+                    limit_price = current_price * (Decimal('1') - offset_pct)
+                else:
+                    limit_price = current_price * (Decimal('1') + offset_pct)
 
-                # 4. КОРОТКАЯ проверка исполнения (~1 секунда, без retry)
-                await asyncio.sleep(1.0)  # Даем время на исполнение
-
-                # 5. Проверка позиции (1 попытка через REST API)
-                positions = await self.market_data.get_positions_rest(
-                    api_key=account.api_key,
-                    market=market
+                order = await client.place_limit_order(
+                    market=market,
+                    side=side,
+                    amount=amount,
+                    price=limit_price,
+                    post_only=False,
+                    reduce_only=False
                 )
 
-                if positions and len(positions) > 0:
-                    pos = positions[0]
-                    pos_size = pos.get('size', 0)
-                    pos_side = pos.get('side', 'UNKNOWN')
-                    pos_entry = pos.get('openPrice', 0)
-                    pos_value = pos.get('notional', 0)
+            # Получаем ID ордера
+            order_id = order.get('id') or order.get('order_id') or order.get('orderId', 'unknown')
 
-                    self.logger.info(
-                        f"✓ {account.name}: MARKET позиция открыта - "
-                        f"{pos_side} {pos_size} @ ${pos_entry} "
-                        f"(notional: ${pos_value:.2f})"
+            self.logger.info(
+                f"{account.name}: ордер размещен, order_id={order_id}"
+            )
+
+            # Проверяем статус ордера через небольшую паузу
+            await asyncio.sleep(0.5)  # Даем время на исполнение
+
+            # Проверяем исполнение через REST API
+            position_confirmed = False
+            if order_id != 'unknown':
+                try:
+                    order_status = await self.market_data.get_order_status_rest(
+                        api_key=account.api_key,
+                        order_id=order_id
                     )
-                    self.stats['successful_orders'] += 1
-                    self.stats['total_orders'] += 1
-                else:
-                    # Позиция не появилась - считаем ошибкой
+
+                    if order_status:
+                        status = order_status.get('status', 'UNKNOWN')
+                        filled_qty = order_status.get('filledQty', 0)
+                        total_qty = order_status.get('qty', 0)
+
+                        self.logger.info(
+                            f"{account.name}: статус ордера: {status}, "
+                            f"исполнено {filled_qty}/{total_qty}"
+                        )
+
+                        if status == 'FILLED':
+                            # Проверяем что позиция реально открыта
+                            # Делаем несколько попыток с увеличивающимся ожиданием
+                            for attempt in range(3):
+                                await asyncio.sleep(0.5 + attempt * 0.5)  # 0.5s, 1s, 1.5s
+
+                                positions = await self.market_data.get_positions_rest(
+                                    api_key=account.api_key,
+                                    market=market
+                                )
+
+                                if positions:
+                                    pos = positions[0]
+                                    pos_size = pos.get('size', 0)
+                                    pos_side = pos.get('side', 'UNKNOWN')
+                                    pos_entry = pos.get('openPrice', 0)
+                                    pos_leverage = pos.get('leverage', 0)
+                                    pos_value = pos.get('notional', 0)
+
+                                    self.logger.info(
+                                        f"✓ {account.name}: позиция ПОДТВЕРЖДЕНА - "
+                                        f"{pos_side} {pos_size} @ ${pos_entry} "
+                                        f"(notional: ${pos_value:.2f}, leverage: {pos_leverage}x)"
+                                    )
+                                    position_confirmed = True
+                                    break
+                                else:
+                                    if attempt < 2:
+                                        self.logger.debug(
+                                            f"{account.name}: позиция еще не появилась, попытка {attempt+1}/3"
+                                        )
+                                    else:
+                                        self.logger.warning(
+                                            f"{account.name}: ордер FILLED, но позиция не найдена после 3 попыток!"
+                                        )
+                        elif status in ['CANCELLED', 'REJECTED', 'EXPIRED']:
+                            self.logger.warning(
+                                f"✗ {account.name}: ордер НЕ исполнен (статус: {status})"
+                            )
+                            self.stats['failed_orders'] += 1
+                            self.stats['total_orders'] += 1
+                            return
+                        else:
+                            self.logger.info(
+                                f"⏳ {account.name}: ордер в процессе (статус: {status})"
+                            )
+
+                except Exception as e:
                     self.logger.warning(
-                        f"✗ {account.name}: MARKET ордер размещен, но позиция не найдена"
+                        f"{account.name}: не удалось проверить статус: {e}"
                     )
-                    self.stats['failed_orders'] += 1
-                    self.stats['total_orders'] += 1
-                    raise Exception("Market order placed but position not found")
 
-                return
+            if not position_confirmed:
+                self.logger.info(
+                    f"{account.name}: ордер размещен (подтверждение позиции будет при мониторинге)"
+                )
+
+            self.stats['successful_orders'] += 1
+            self.stats['total_orders'] += 1
 
         except Exception as e:
             self.logger.error(
@@ -928,35 +923,15 @@ class BatchTrader:
                 f"(entry: {entry_price}, PnL: ${pnl_value:+.2f})"
             )
 
-            # Выбираем метод закрытия в зависимости от order_mode
-            order_type = TRADING_SETTINGS.get('order_mode', 'LIMIT')
+            # Для лимитных ордеров используем retry логику
+            success = await self._close_position_with_limit_retry(
+                account=account,
+                market=market,
+                position=position
+            )
 
-            # Валидация order_mode
-            if order_type not in ['LIMIT', 'MARKET']:
-                self.logger.warning(f"Invalid order_mode '{order_type}', using LIMIT")
-                order_type = 'LIMIT'
-
-            # === LIMIT режим: retry + fallback ===
-            if order_type == "LIMIT":
-                success = await self._close_position_with_limit_retry(
-                    account=account,
-                    market=market,
-                    position=position
-                )
-
-                if not success:
-                    raise Exception("Failed to close position with limit orders")
-
-            # === MARKET режим: 1 попытка с маркет-ордером ===
-            elif order_type == "MARKET":
-                success = await self._close_position_with_market(
-                    account=account,
-                    market=market,
-                    position=position
-                )
-
-                if not success:
-                    raise Exception("Failed to close position with market order")
+            if not success:
+                raise Exception("Failed to close position with limit orders")
 
             return
 
@@ -1287,10 +1262,7 @@ class BatchTrader:
                         await asyncio.sleep(3)
 
             except Exception as e:
-                import traceback
-                error_msg = f"{type(e).__name__}: {str(e)}"
-                self.logger.error(f"{account.name} | Ошибка открытия позиции: {error_msg}")
-                self.logger.debug(f"{account.name} | Traceback: {traceback.format_exc()}")
+                self.logger.error(f"{account.name} | Ошибка открытия позиции: {e}")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(random.uniform(2, 5))
 
@@ -1587,92 +1559,6 @@ class BatchTrader:
 
         return False
 
-    async def _close_position_with_market(
-        self,
-        account: AccountConfig,
-        market: str,
-        position: Dict[str, Any]
-    ) -> bool:
-        """
-        Закрыть позицию маркет-ордером (для MARKET режима)
-        Одна попытка, без retry, быстрое исполнение
-
-        Args:
-            account: Аккаунт
-            market: Рынок (например "BTC-USD")
-            position: Информация о позиции
-
-        Returns:
-            True если закрыто успешно, False если нет
-        """
-        client = self.clients[account.name]
-
-        try:
-            pos_side = position['side']  # LONG или SHORT
-            pos_size = Decimal(str(position['size']))
-
-            # Определяем направление закрытия (противоположное позиции)
-            close_side = "SELL" if pos_side == "LONG" else "BUY"
-
-            self.logger.info(
-                f"{account.name}: Закрытие {pos_side} позиции маркет-ордером "
-                f"{market} {pos_size}"
-            )
-
-            # 1. Отменить все старые ордера (чтобы не блокировали баланс)
-            try:
-                await client.mass_cancel_all_orders()
-                await asyncio.sleep(0.5)
-            except Exception as e:
-                self.logger.debug(f"{account.name}: Ошибка отмены ордеров (игнорируем): {e}")
-
-            # 2. Разместить маркет-ордер на закрытие
-            order = await client.place_market_order(
-                market=market,
-                side=close_side,
-                amount=pos_size,
-                market_data_provider=self.market_data,
-                reduce_only=True  # Только закрытие позиции
-            )
-
-            # 3. Короткое ожидание исполнения
-            await asyncio.sleep(1.0)
-
-            # 4. Проверка закрытия (1 попытка)
-            positions = await self.market_data.get_positions_rest(
-                api_key=account.api_key,
-                market=market
-            )
-
-            # Позиция закрыта если список пуст или size = 0
-            if not positions or len(positions) == 0:
-                self.logger.info(f"✓ {account.name}: Позиция закрыта (MARKET)")
-                # Отменить все оставшиеся ордера
-                try:
-                    await client.mass_cancel_all_orders()
-                except Exception as e:
-                    self.logger.debug(f"{account.name}: Ошибка отмены ордеров после закрытия: {e}")
-                return True
-            else:
-                pos_size_after = Decimal(str(positions[0].get('size', 0)))
-                if pos_size_after < Decimal('0.0001'):  # По сути 0
-                    self.logger.info(f"✓ {account.name}: Позиция закрыта (MARKET)")
-                    try:
-                        await client.mass_cancel_all_orders()
-                    except Exception as e:
-                        self.logger.debug(f"{account.name}: Ошибка отмены ордеров после закрытия: {e}")
-                    return True
-                else:
-                    self.logger.warning(
-                        f"{account.name}: Маркет-ордер не закрыл позицию полностью "
-                        f"(осталось {pos_size_after})"
-                    )
-                    return False
-
-        except Exception as e:
-            self.logger.error(f"{account.name}: Ошибка закрытия MARKET: {e}")
-            return False
-
     # ============================================================================
 
     async def close_all_positions(self, timeout: float = 60.0):
@@ -1895,7 +1781,7 @@ class BatchTrader:
         close_timeout = TRADING_SETTINGS['position_close_timeout']
         delay_range = DELAYS.get('between_accounts', [3, 5])  # Задержка между аккаунтами при закрытии
         use_market_fallback = LIMIT_ORDER_CONFIG.get('use_market_fallback', True)
-        order_type = TRADING_SETTINGS.get('order_mode', 'LIMIT')  # ИСПРАВЛЕНО: order_mode вместо order_type
+        order_type = TRADING_SETTINGS.get('order_type', 'LIMIT')
 
         # Словарь для отслеживания статуса закрытия
         close_status = {f"{p['account_name']}:{p['market']}": False for p in positions_to_close}
