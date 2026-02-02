@@ -234,7 +234,7 @@ class ExtendedClient:
                     self.logger.debug(f"{self.account_config.name} | Прогрев кэша markets (попытка {attempt}/{max_retries})...")
                     markets = await asyncio.wait_for(
                         self._load_required_markets(),
-                        timeout=30.0
+                        timeout=60.0
                     )
                     self.logger.debug(f"{self.account_config.name} | Markets загружены: {list(markets.keys())}")
                     # Сохраняем в приватный атрибут SDK для кэширования
@@ -246,14 +246,14 @@ class ExtendedClient:
                     last_error = RuntimeError(f"Proxy timeout for {self.account_config.name}")
                     if attempt < max_retries:
                         self.logger.warning(
-                            f"{self.account_config.name} | ТАЙМАУТ загрузки markets (30s), "
+                            f"{self.account_config.name} | ТАЙМАУТ загрузки markets (60s), "
                             f"попытка {attempt}/{max_retries}. Прокси: {proxy_info}. "
                             f"Повтор через {retry_delay}s..."
                         )
                         await asyncio.sleep(retry_delay)
                     else:
                         self.logger.error(
-                            f"{self.account_config.name} | ТАЙМАУТ загрузки markets (30s)! "
+                            f"{self.account_config.name} | ТАЙМАУТ загрузки markets (60s)! "
                             f"Все {max_retries} попытки исчерпаны. Прокси не работает: {proxy_info}"
                         )
                 except Exception as e:
