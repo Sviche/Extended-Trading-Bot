@@ -113,6 +113,7 @@ class AccountBatch:
     short_accounts: List[AccountConfig]  # Шорт-аккаунты
     market: str  # Рынок для торговли
     created_at: datetime
+    batch_number: int = 0  # Номер пачки
 
     @property
     def total_accounts(self) -> int:
@@ -193,17 +194,56 @@ class BatchTrader:
         # BatchTrader инициализирован (техническая информация)
 
     async def initialize(self):
-        """Инициализировать всех клиентов и WebSocket"""
-        # Инициализируем клиентов
-        tasks = []
-        for client in self.clients.values():
-            tasks.append(client.initialize())
+        """Инициализировать всех клиентов и WebSocket
+        
+        Инициализация с отказоустойчивостью:
+        - Все аккаунты инициализируются параллельно
+        - Если часть аккаунтов не инициализировалась - продолжаем с оставшимися
+        - Критическая ошибка только если НИ ОДИН аккаунт не инициализирован
+        """
+        # Инициализируем клиентов параллельно
+        tasks = {}
+        for name, client in self.clients.items():
+            tasks[name] = asyncio.create_task(client.initialize())
 
-        try:
-            await asyncio.gather(*tasks)
-        except Exception as e:
-            self.logger.error(f"Ошибка инициализации клиентов: {e}")
-            raise
+        # Ждем завершения ВСЕХ задач (return_exceptions=True не бросает исключение)
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        
+        # Анализируем результаты
+        failed_accounts = []
+        successful_accounts = []
+        
+        for (name, _), result in zip(tasks.items(), results):
+            if isinstance(result, Exception):
+                failed_accounts.append((name, str(result)))
+                # Удаляем failed клиент из списка
+                if name in self.clients:
+                    del self.clients[name]
+            else:
+                successful_accounts.append(name)
+        
+        # Логируем результаты
+        if failed_accounts:
+            self.logger.warning(
+                f"⚠️ Не удалось инициализировать {len(failed_accounts)} аккаунт(ов): "
+                f"{', '.join([f'{n} ({e})' for n, e in failed_accounts])}"
+            )
+        
+        if successful_accounts:
+            self.logger.info(
+                f"✅ Успешно инициализировано {len(successful_accounts)} аккаунт(ов): "
+                f"{', '.join(successful_accounts)}"
+            )
+        
+        # Обновляем список accounts чтобы соответствовал успешным клиентам
+        self.accounts = [acc for acc in self.accounts if acc.name in self.clients]
+        
+        # Критическая ошибка только если НИ ОДИН аккаунт не работает
+        if not self.clients:
+            raise RuntimeError(
+                f"Критическая ошибка: не удалось инициализировать НИ ОДНОГО аккаунта. "
+                f"Проверьте прокси и ключи. Ошибки: {failed_accounts}"
+            )
 
         # Запускаем WebSocket Manager для лимитных ордеров (в фоне, без логирования)
         if self.ws_manager:
@@ -267,15 +307,15 @@ class BatchTrader:
                 long_accounts=longs,
                 short_accounts=shorts,
                 market=market,
-                created_at=datetime.now()
+                created_at=datetime.now(),
+                batch_number=len(batches) + 1
             )
 
             batches.append(batch)
 
             self.logger.info(
-                f"Создана пачка: {batch.total_accounts} аккаунтов "
-                f"({batch.long_count} лонгов, {batch.short_count} шортов) "
-                f"на {market}"
+                f"Пачка #{batch.batch_number}: {batch.total_accounts} акк "
+                f"({batch.long_count}L/{batch.short_count}S) на {market}"
             )
 
         self.stats['total_batches'] += len(batches)
@@ -340,7 +380,7 @@ class BatchTrader:
 
         self.logger.info(
             f"\n{'='*60}\n"
-            f"ОТКРЫТИЕ ПОЗИЦИЙ: {batch.market}\n"
+            f"BATCH #{batch.batch_number} | ОТКРЫТИЕ ПОЗИЦИЙ: {batch.market}\n"
             f"{'='*60}"
         )
         self.logger.info(
@@ -417,6 +457,11 @@ class BatchTrader:
         tasks = []
 
         for idx, params in enumerate(accounts_to_open):
+            # Логируем параметры запуска для отладки параллельности
+            client = self.clients[params['account'].name]
+            self.logger.debug(
+                f"Запуск задачи открытия: idx={idx}, account={params['account'].name}, side={params['side']}, size_usd={params['size_usd']}, proxy={client.proxy}"
+            )
             # Создаём task для открытия позиции
             task = asyncio.create_task(
                 self._open_position(
@@ -446,7 +491,8 @@ class BatchTrader:
 
         for result in results:
             if isinstance(result, Exception):
-                self.logger.error(f"Ошибка открытия позиции: {result}")
+                self.logger.error(f"Ошибка открытия позиции: {type(result).__name__}: {str(result)}")
+                self.logger.error(f"Traceback: {''.join(traceback.format_exception(type(result), result, result.__traceback__))}")
                 failed_count += 1
             else:
                 opened_count += 1
@@ -542,86 +588,59 @@ class BatchTrader:
                     reduce_only=False
                 )
 
-            # Получаем ID ордера
+            # Получаем ID ордера (только для внутренних целей, не логируем)
             order_id = order.get('id') or order.get('order_id') or order.get('orderId', 'unknown')
 
-            self.logger.info(
-                f"{account.name}: ордер размещен, order_id={order_id}"
-            )
-
-            # Проверяем статус ордера через небольшую паузу
-            await asyncio.sleep(0.5)  # Даем время на исполнение
-
-            # Проверяем исполнение через REST API
+            # Для IOC маркет-ордеров НЕ проверяем статус через get_order_by_id
+            # (API возвращает 404 т.к. ордер уже исполнен/отменен)
+            # Вместо этого проверяем позицию напрямую через get_positions()
+            
             position_confirmed = False
-            if order_id != 'unknown':
+            
+            # Даем время на исполнение и проверяем позицию
+            for attempt in range(3):
+                await asyncio.sleep(0.5 + attempt * 0.3)  # 0.5s, 0.8s, 1.1s
+
                 try:
-                    order_status = await self.market_data.get_order_status_rest(
-                        api_key=account.api_key,
-                        order_id=order_id
-                    )
+                    positions_response = await client.trading_client.account.get_positions()
+                    
+                    if positions_response and positions_response.data:
+                        # Ищем позицию для нужного рынка
+                        for pos in positions_response.data:
+                            if pos.market == market and float(pos.size) != 0:
+                                pos_size = float(pos.size)
+                                pos_side = pos.side.value if hasattr(pos.side, 'value') else str(pos.side)
+                                pos_entry = float(pos.open_price)
+                                pos_leverage = float(pos.leverage) if hasattr(pos, 'leverage') else 0
+                                pos_value = float(pos.notional) if hasattr(pos, 'notional') else 0
 
-                    if order_status:
-                        status = order_status.get('status', 'UNKNOWN')
-                        filled_qty = order_status.get('filledQty', 0)
-                        total_qty = order_status.get('qty', 0)
-
-                        self.logger.info(
-                            f"{account.name}: статус ордера: {status}, "
-                            f"исполнено {filled_qty}/{total_qty}"
-                        )
-
-                        if status == 'FILLED':
-                            # Проверяем что позиция реально открыта
-                            # Делаем несколько попыток с увеличивающимся ожиданием
-                            for attempt in range(3):
-                                await asyncio.sleep(0.5 + attempt * 0.5)  # 0.5s, 1s, 1.5s
-
-                                positions = await self.market_data.get_positions_rest(
-                                    api_key=account.api_key,
-                                    market=market
+                                self.logger.info(
+                                    f"✓ {account.name}: позиция ПОДТВЕРЖДЕНА - "
+                                    f"{pos_side} {pos_size} @ ${pos_entry} "
+                                    f"(notional: ${pos_value:.2f}, leverage: {pos_leverage}x)"
                                 )
-
-                                if positions:
-                                    pos = positions[0]
-                                    pos_size = pos.get('size', 0)
-                                    pos_side = pos.get('side', 'UNKNOWN')
-                                    pos_entry = pos.get('openPrice', 0)
-                                    pos_leverage = pos.get('leverage', 0)
-                                    pos_value = pos.get('notional', 0)
-
-                                    self.logger.info(
-                                        f"✓ {account.name}: позиция ПОДТВЕРЖДЕНА - "
-                                        f"{pos_side} {pos_size} @ ${pos_entry} "
-                                        f"(notional: ${pos_value:.2f}, leverage: {pos_leverage}x)"
-                                    )
-                                    position_confirmed = True
-                                    break
-                                else:
-                                    if attempt < 2:
-                                        self.logger.debug(
-                                            f"{account.name}: позиция еще не появилась, попытка {attempt+1}/3"
-                                        )
-                                    else:
-                                        self.logger.warning(
-                                            f"{account.name}: ордер FILLED, но позиция не найдена после 3 попыток!"
-                                        )
-                        elif status in ['CANCELLED', 'REJECTED', 'EXPIRED']:
-                            self.logger.warning(
-                                f"✗ {account.name}: ордер НЕ исполнен (статус: {status})"
+                                position_confirmed = True
+                                break
+                    
+                    if position_confirmed:
+                        break
+                    else:
+                        if attempt < 2:
+                            self.logger.debug(
+                                f"{account.name}: позиция еще не появилась, попытка {attempt+1}/3"
                             )
-                            self.stats['failed_orders'] += 1
-                            self.stats['total_orders'] += 1
-                            return
                         else:
-                            self.logger.info(
-                                f"⏳ {account.name}: ордер в процессе (статус: {status})"
+                            self.logger.warning(
+                                f"{account.name}: ордер размещен, но позиция не найдена после 3 попыток!"
                             )
-
+                
                 except Exception as e:
                     self.logger.warning(
-                        f"{account.name}: не удалось проверить статус: {e}"
+                        f"{account.name}: ошибка проверки позиции (попытка {attempt+1}/3): {e}"
                     )
+                    if attempt == 2:
+                        # На последней попытке не пробрасываем исключение
+                        pass
 
             if not position_confirmed:
                 self.logger.info(
@@ -633,8 +652,9 @@ class BatchTrader:
 
         except Exception as e:
             self.logger.error(
-                f"{account.name}: ошибка открытия позиции: {e}"
+                f"{account.name}: ошибка открытия позиции: {type(e).__name__}: {str(e)}"
             )
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
             self.stats['failed_orders'] += 1
             self.stats['total_orders'] += 1
             raise
@@ -646,11 +666,6 @@ class BatchTrader:
         Позиции закрываются автоматически по истечении времени удержания.
         TP/SL не используются.
         """
-        self.logger.info("")
-        self.logger.info("=" * 60)
-        self.logger.info(f"Начало мониторинга позиций пачки {batch.market}")
-        self.logger.info("=" * 60)
-
         market_name = f"{batch.market}-USD"
         all_accounts = batch.long_accounts + batch.short_accounts
 
@@ -660,10 +675,12 @@ class BatchTrader:
         hold_duration = random.randint(min_hold, max_hold)
         end_time = start_time + timedelta(seconds=hold_duration)
 
-        self.logger.info(
-            f"Время удержания позиций: {hold_duration} сек "
-            f"(до {end_time.strftime('%H:%M:%S')})"
-        )
+        # Компактный заголовок мониторинга
+        self.logger.info("")
+        self.logger.info(f"{'─' * 55}")
+        self.logger.info(f"📊 ПАЧКА #{batch.batch_number} | {batch.market} | {len(all_accounts)} акк ({batch.long_count}L/{batch.short_count}S)")
+        self.logger.info(f"⏱️  Удержание: {hold_duration}с (до {end_time.strftime('%H:%M:%S')})")
+        self.logger.info(f"{'─' * 55}")
 
         monitor_interval = POSITION_MANAGEMENT['monitor_interval_sec']
 
@@ -672,10 +689,6 @@ class BatchTrader:
 
         # Счетчик итераций для периодической сводки
         iteration = 0
-
-        self.logger.info(
-            f"Мониторинг начат: {len(open_positions)} позиций на {market_name}"
-        )
 
         while open_positions and datetime.now() < end_time:
             try:
@@ -687,12 +700,10 @@ class BatchTrader:
                 minutes_left = int(time_left // 60)
                 seconds_left = int(time_left % 60)
 
-                # Периодическая сводка каждые N итераций
-                if iteration % 3 == 0:  # Каждые 3 итерации (примерно каждые 15 сек при интервале 5 сек)
-                    self.logger.info(
-                        f"Мониторинг: {len(open_positions)} позиций активны, "
-                        f"осталось {minutes_left}м {seconds_left}с"
-                    )
+                # Собираем данные всех позиций для группового отображения
+                long_positions_data = []
+                short_positions_data = []
+                closed_this_iteration = []
 
                 # Проверяем каждый аккаунт
                 for account_name in list(open_positions):
@@ -727,9 +738,7 @@ class BatchTrader:
 
                         if not positions:
                             # Позиция уже закрыта или не была открыта
-                            self.logger.info(
-                                f"{account_name}: позиция не найдена (уже закрыта или не открывалась)"
-                            )
+                            closed_this_iteration.append(account_name)
                             open_positions.discard(account_name)
                             continue
 
@@ -750,7 +759,6 @@ class BatchTrader:
                         unrealized_pnl = position.get('unrealisedPnl', 0)
                         mark_price = position.get('markPrice', 0)
                         entry_price = position.get('openPrice', 0)
-                        notional = position.get('notional', 0)
 
                         # Проверяем условия закрытия
                         pnl_pct = self._calculate_pnl_percent(position)
@@ -761,12 +769,20 @@ class BatchTrader:
                         except (ValueError, TypeError):
                             pnl_value = 0.0
 
-                        # Логируем состояние позиции на каждой итерации для лучшей видимости
-                        self.logger.info(
-                            f"{account_name}: {side} {size} @ ${entry_price} "
-                            f"(mark: ${mark_price}, notional: ${notional:.2f}) | "
-                            f"PnL: {pnl_pct:+.2f}% (${pnl_value:+.2f})"
-                        )
+                        # Собираем данные для группового отображения
+                        pos_data = {
+                            'account': account_name,
+                            'size': size,
+                            'entry': entry_price,
+                            'mark': mark_price,
+                            'pnl_pct': pnl_pct,
+                            'pnl_value': pnl_value
+                        }
+
+                        if side == 'LONG':
+                            long_positions_data.append(pos_data)
+                        else:
+                            short_positions_data.append(pos_data)
 
                         # TP/SL не используются, закрытие только по таймеру
 
@@ -776,6 +792,17 @@ class BatchTrader:
                             f"Traceback:\n{traceback.format_exc()}"
                         )
 
+                # Выводим сгруппированную информацию
+                self._print_positions_summary(
+                    batch.market,
+                    long_positions_data,
+                    short_positions_data,
+                    minutes_left,
+                    seconds_left,
+                    closed_this_iteration,
+                    batch.batch_number
+                )
+
             except Exception as e:
                 self.logger.error(
                     f"Ошибка внешнего цикла мониторинга: {e}\n"
@@ -784,9 +811,10 @@ class BatchTrader:
 
         # Закрываем оставшиеся позиции по истечении времени
         if open_positions:
-            self.logger.info(
-                f"⏰ Истекло время удержания! Закрытие {len(open_positions)} оставшихся позиций..."
-            )
+            self.logger.info("")
+            self.logger.info(f"{'─' * 55}")
+            self.logger.info(f"⏰ ПАЧКА #{batch.batch_number} {batch.market} | Закрытие {len(open_positions)} позиций...")
+            self.logger.info(f"{'─' * 55}")
 
             # Собираем информацию о всех позициях для параллельного закрытия
             positions_to_close = []
@@ -817,10 +845,9 @@ class BatchTrader:
                         except (ValueError, TypeError):
                             pnl_value = 0.0
 
-                        self.logger.info(
-                            f"🕒 {account_name}: закрытие по времени | "
-                            f"финальный PnL: {pnl_pct:+.2f}% (${pnl_value:+.2f})"
-                        )
+                        pnl_icon = "🟢" if pnl_value >= 0 else "🔴"
+                        acc_short = account_name.replace('Account_', '')
+                        self.logger.info(f"  {pnl_icon} {acc_short}: {pnl_pct:+.2f}% (${pnl_value:+.2f})")
 
                         # Добавляем в список для закрытия
                         positions_to_close.append({
@@ -854,21 +881,103 @@ class BatchTrader:
 
             # Параллельное закрытие всех позиций с задержкой между ордерами
             if positions_to_close:
-                self.logger.info(f"Запуск параллельного закрытия {len(positions_to_close)} позиций...")
+                self.logger.info(f"  🔄 Закрываем {len(positions_to_close)} позиций...")
                 await self._close_positions_batch(positions_to_close)
-                self.logger.success(f"Закрытие позиций завершено")
+                self.logger.success(f"  ✅ Закрытие завершено")
             else:
-                self.logger.info("Нет позиций для закрытия (все уже закрыты)")
+                self.logger.info(f"  ℹ️  Все позиции уже закрыты")
         else:
             self.logger.success(
-                f"Все позиции закрыты досрочно (по TP/SL)"
+                f"✅ Пачка #{batch.batch_number}: все позиции закрыты досрочно"
             )
 
-        self.logger.info(
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Мониторинг пачки {batch.market} ЗАВЕРШЕН\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        )
+        self.logger.info(f"{'─' * 55}")
+        self.logger.info(f"✅ ПАЧКА #{batch.batch_number} {batch.market} ЗАВЕРШЕНА")
+        self.logger.info(f"{'─' * 55}")
+        self.logger.info("")
+
+    def _print_positions_summary(
+        self,
+        market: str,
+        long_positions: list,
+        short_positions: list,
+        minutes_left: int,
+        seconds_left: int,
+        closed_positions: list = None,
+        batch_number: int = 0
+    ):
+        """Вывести компактную сводку по позициям пачки"""
+        width = 50  # Внутренняя ширина
+        
+        # Вычисляем суммарный PnL
+        total_long_pnl = sum(p['pnl_value'] for p in long_positions)
+        total_short_pnl = sum(p['pnl_value'] for p in short_positions)
+        total_pnl = total_long_pnl + total_short_pnl
+        
+        # Получаем mark price из любой позиции
+        mark_price = 0
+        if long_positions:
+            mark_price = long_positions[0]['mark']
+        elif short_positions:
+            mark_price = short_positions[0]['mark']
+        
+        # Форматируем mark price компактно
+        try:
+            mark_val = float(mark_price)
+            if mark_val >= 1000:
+                mark_str = f"${mark_val:,.0f}"
+            else:
+                mark_str = f"${mark_val:.2f}"
+        except (ValueError, TypeError):
+            mark_str = f"${mark_price}"
+        
+        # Знак PnL
+        pnl_sign = "+" if total_pnl >= 0 else ""
+        
+        # Заголовок
+        self.logger.info("")
+        self.logger.info(f"╔{'═' * width}╗")
+        header = f" BATCH #{batch_number} | {market} | {mark_str} | {minutes_left:02d}:{seconds_left:02d} | {pnl_sign}${total_pnl:.2f}"
+        self.logger.info(f"║{header:<{width}}║")
+        self.logger.info(f"╠{'═' * width}╣")
+        
+        # Закрытые позиции
+        if closed_positions:
+            for acc in closed_positions:
+                content = f" [X] {acc} CLOSED"
+                self.logger.info(f"║{content:<{width}}║")
+        
+        # LONG позиции
+        if long_positions:
+            long_positions.sort(key=lambda x: x['account'])
+            parts = []
+            for pos in long_positions:
+                acc_short = pos['account'].replace('Account_', '')
+                pnl_val = pos['pnl_value']
+                sign = "+" if pnl_val >= 0 else "-"
+                parts.append(f"{acc_short}:{sign}${abs(pnl_val):.2f}")
+            
+            content = f" [L] LONG ({len(long_positions)}): " + " ".join(parts)
+            if len(content) > width:
+                content = content[:width-3] + "..."
+            self.logger.info(f"║{content:<{width}}║")
+        
+        # SHORT позиции
+        if short_positions:
+            short_positions.sort(key=lambda x: x['account'])
+            parts = []
+            for pos in short_positions:
+                acc_short = pos['account'].replace('Account_', '')
+                pnl_val = pos['pnl_value']
+                sign = "+" if pnl_val >= 0 else "-"
+                parts.append(f"{acc_short}:{sign}${abs(pnl_val):.2f}")
+            
+            content = f" [S] SHORT({len(short_positions)}): " + " ".join(parts)
+            if len(content) > width:
+                content = content[:width-3] + "..."
+            self.logger.info(f"║{content:<{width}}║")
+        
+        self.logger.info(f"╚{'═' * width}╝")
 
     def _calculate_pnl_percent(self, position: Dict) -> Decimal:
         """Вычислить PnL в процентах"""
@@ -1159,6 +1268,9 @@ class BatchTrader:
                 cancelled = await client.cancel_all_orders(
                     market=market,
                     market_data_provider=self.market_data
+                )
+                self.logger.debug(
+                    f"{account.name} | cancel_all_orders returned: {cancelled} (attempt {attempt+1}/{max_retries})"
                 )
                 if cancelled > 0:
                     # Даём время на обработку отмены

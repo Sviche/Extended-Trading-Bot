@@ -5,6 +5,7 @@ Extended Client - Обертка для работы с Extended Protocol SDK
 
 import asyncio
 import os
+import traceback
 from decimal import Decimal
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
@@ -13,13 +14,19 @@ from x10.perpetual.accounts import StarkPerpetualAccount
 from x10.perpetual.configuration import MAINNET_CONFIG, TESTNET_CONFIG
 from x10.perpetual.trading_client import PerpetualTradingClient
 from x10.perpetual.orders import OrderSide, TimeInForce
+from x10.utils.http import CLIENT_TIMEOUT
+
+import aiohttp
+try:
+    from aiohttp_socks import ProxyConnector
+    PROXY_SUPPORT = True
+except ImportError:
+    PROXY_SUPPORT = False
 
 from modules.core.logger import setup_logger
 from modules.helpers.market_rules import market_rules
 from modules.helpers.sdk_proxy_patch import (
     install_sdk_proxy_patch,
-    set_current_proxy,
-    get_current_proxy,
     normalize_proxy_url,
     mask_proxy_url
 )
@@ -27,6 +34,10 @@ from settings import TRADING_SETTINGS
 
 # Устанавливаем патч SDK при импорте модуля
 _sdk_patch_installed = install_sdk_proxy_patch()
+
+# ПРИМЕЧАНИЕ: Глобальная блокировка больше не нужна!
+# Каждый клиент теперь использует свою собственную aiohttp сессию с прокси.
+# Это устраняет race condition полностью.
 
 
 def setup_proxy_env(proxy: Optional[str]) -> None:
@@ -146,6 +157,9 @@ class ExtendedClient:
         # Trading client будет создан асинхронно
         self.trading_client: Optional[PerpetualTradingClient] = None
         self._initialized = False
+        
+        # Per-client aiohttp сессия с прокси (создается в initialize())
+        self._custom_session: Optional[aiohttp.ClientSession] = None
 
         proxy_info = f", proxy: {mask_proxy_url(self.proxy)}" if self.proxy else ", proxy: None"
         self.logger.debug(
@@ -154,13 +168,8 @@ class ExtendedClient:
             f"testnet: {testnet}{proxy_info})"
         )
 
-    def _set_proxy(self):
-        """Установить прокси для текущего аккаунта перед SDK операцией"""
-        set_current_proxy(self.proxy)
-
-    def _clear_proxy(self):
-        """Очистить прокси после SDK операции"""
-        set_current_proxy(None)
+    # УДАЛЕНО: _set_proxy и _clear_proxy больше не нужны
+    # Каждый клиент теперь использует свою собственную сессию с прокси
 
     async def initialize(self):
         """Асинхронная инициализация клиента"""
@@ -168,20 +177,159 @@ class ExtendedClient:
             return
 
         try:
-            # Устанавливаем прокси перед созданием клиента
-            self._set_proxy()
-
+            # Создаем trading client СНАЧАЛА
             self.trading_client = PerpetualTradingClient(
                 endpoint_config=self.config,
                 stark_account=self.stark_account
             )
+            
+            # Создаем per-client aiohttp сессию с прокси
+            if self.proxy and PROXY_SUPPORT:
+                try:
+                    connector = ProxyConnector.from_url(self.proxy)
+                    self._custom_session = aiohttp.ClientSession(
+                        connector=connector,
+                        timeout=CLIENT_TIMEOUT,
+                        trust_env=False  # Игнорируем системные прокси
+                    )
+                    self.logger.debug(
+                        f"{self.account_config.name} | Per-client сессия создана с прокси: "
+                        f"{mask_proxy_url(self.proxy)}"
+                    )
+                except Exception as e:
+                    self.logger.error(
+                        f"{self.account_config.name} | Ошибка создания сессии с прокси: {e}"
+                    )
+                    # Fallback на сессию без прокси
+                    self._custom_session = aiohttp.ClientSession(timeout=CLIENT_TIMEOUT)
+            else:
+                # Без прокси или без поддержки прокси
+                self._custom_session = aiohttp.ClientSession(timeout=CLIENT_TIMEOUT)
+                if not self.proxy:
+                    self.logger.debug(f"{self.account_config.name} | Сессия создана БЕЗ прокси")
+                elif not PROXY_SUPPORT:
+                    self.logger.warning(
+                        f"{self.account_config.name} | aiohttp-socks не установлен, "
+                        f"прокси игнорируется"
+                    )
+            
+            # ВАЖНО: Передаем кастомную сессию во ВСЕ модули trading_client
+            # Патч get_session() будет использовать её с приоритетом
+            # Модули SDK: account, markets, orders, markets_info, info
+            for module_name in ['account', 'markets', 'orders', 'markets_info', 'info']:
+                if hasattr(self.trading_client, module_name):
+                    module = getattr(self.trading_client, module_name)
+                    module._custom_session = self._custom_session
+                    self.logger.debug(f"{self.account_config.name} | _custom_session установлен для {module_name}")
+            
+            # ПРОГРЕВ КЭША: Загружаем ТОЛЬКО нужные маркеты из settings.py
+            # Это уменьшает трафик с 94 маркетов (~200KB) до 2 (~4KB)
+            # С retry логикой для отказоустойчивости
+            max_retries = 3
+            retry_delay = 5  # секунд между попытками
+            last_error = None
+            
+            for attempt in range(1, max_retries + 1):
+                try:
+                    self.logger.debug(f"{self.account_config.name} | Прогрев кэша markets (попытка {attempt}/{max_retries})...")
+                    markets = await asyncio.wait_for(
+                        self._load_required_markets(),
+                        timeout=30.0
+                    )
+                    self.logger.debug(f"{self.account_config.name} | Markets загружены: {list(markets.keys())}")
+                    # Сохраняем в приватный атрибут SDK для кэширования
+                    self.trading_client._PerpetualTradingClient__markets = markets
+                    last_error = None
+                    break  # Успех - выходим из цикла
+                except asyncio.TimeoutError:
+                    proxy_info = self.account_config.proxy or "без прокси"
+                    last_error = RuntimeError(f"Proxy timeout for {self.account_config.name}")
+                    if attempt < max_retries:
+                        self.logger.warning(
+                            f"{self.account_config.name} | ТАЙМАУТ загрузки markets (30s), "
+                            f"попытка {attempt}/{max_retries}. Прокси: {proxy_info}. "
+                            f"Повтор через {retry_delay}s..."
+                        )
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        self.logger.error(
+                            f"{self.account_config.name} | ТАЙМАУТ загрузки markets (30s)! "
+                            f"Все {max_retries} попытки исчерпаны. Прокси не работает: {proxy_info}"
+                        )
+                except Exception as e:
+                    last_error = e
+                    if attempt < max_retries:
+                        self.logger.warning(
+                            f"{self.account_config.name} | Ошибка загрузки markets: {e}. "
+                            f"Попытка {attempt}/{max_retries}. Повтор через {retry_delay}s..."
+                        )
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        self.logger.error(
+                            f"{self.account_config.name} | Ошибка загрузки markets: {e}. "
+                            f"Все {max_retries} попытки исчерпаны."
+                        )
+            
+            if last_error:
+                raise last_error
+            
             self._initialized = True
             self.logger.debug(f"{self.account_config.name} | Клиент инициализирован")
+            
         except Exception as e:
             self.logger.error(f"{self.account_config.name} | Ошибка инициализации: {e}")
+            # Закрываем сессию при ошибке
+            if self._custom_session:
+                try:
+                    await self._custom_session.close()
+                except:
+                    pass
+                self._custom_session = None
             raise
-        finally:
-            self._clear_proxy()
+
+    async def _load_required_markets(self) -> Dict[str, Any]:
+        """
+        Загрузить только маркеты указанные в settings.py
+        Вместо 94 маркетов (~200KB) загружаем только нужные (~4KB)
+        
+        Returns:
+            Dict с маркетами {market_name: MarketModel}
+        """
+        required_markets = TRADING_SETTINGS.get('markets', ['BTC', 'ETH'])
+        markets_dict = {}
+        
+        session = await self.trading_client.markets_info.get_session()
+        # Всегда mainnet
+        base_url = MAINNET_CONFIG.api_base_url
+        
+        for market_symbol in required_markets:
+            market_name = f"{market_symbol}-USD"
+            url = f"{base_url}/info/markets?market={market_name}"
+            
+            try:
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        market_list = data.get('data', [])
+                        if market_list:
+                            # SDK ожидает MarketModel, создаем из dict
+                            from x10.perpetual.markets import MarketModel
+                            market_model = MarketModel.model_validate(market_list[0])
+                            markets_dict[market_name] = market_model
+                    else:
+                        self.logger.warning(
+                            f"{self.account_config.name} | Маркет {market_name} не найден: {resp.status}"
+                        )
+            except Exception as e:
+                self.logger.error(
+                    f"{self.account_config.name} | Ошибка загрузки {market_name}: {e}"
+                )
+                raise
+        
+        if not markets_dict:
+            raise RuntimeError(f"Не удалось загрузить ни одного маркета")
+        
+        return markets_dict
 
     async def get_balance(self) -> Dict[str, Any]:
         """
@@ -193,15 +341,12 @@ class ExtendedClient:
         await self._ensure_initialized()
 
         try:
-            self._set_proxy()
             balance = await self.trading_client.account.get_balance()
             self.logger.debug(f"Баланс {self.account_config.name}: {balance}")
             return balance
         except Exception as e:
             self.logger.error(f"Ошибка получения баланса: {e}")
             raise
-        finally:
-            self._clear_proxy()
 
     async def get_positions(self, market: Optional[str] = None) -> List[Dict[str, Any]]:
         """
@@ -216,7 +361,6 @@ class ExtendedClient:
         await self._ensure_initialized()
 
         try:
-            self._set_proxy()
             # Вызываем SDK метод
             market_names = [market] if market else None
             self.logger.debug(
@@ -319,8 +463,6 @@ class ExtendedClient:
                 f"Traceback:\n{traceback.format_exc()}"
             )
             raise
-        finally:
-            self._clear_proxy()
 
     async def place_market_order(
         self,
@@ -353,7 +495,6 @@ class ExtendedClient:
         await self._ensure_initialized()
 
         try:
-            self._set_proxy()
             # Конвертируем строку в OrderSide enum
             order_side = OrderSide.BUY if side.upper() == "BUY" else OrderSide.SELL
 
@@ -387,21 +528,18 @@ class ExtendedClient:
                 time_in_force=TimeInForce.IOC  # Immediate or Cancel
             )
 
-            # Конвертируем WrappedApiResponse в словарь
+            # Получаем order_id напрямую из response.data.id
+            order_id = placed_order.data.id if hasattr(placed_order, 'data') and hasattr(placed_order.data, 'id') else 'unknown'
+            
+            # Конвертируем в словарь для возврата
             order_dict = placed_order.model_dump() if hasattr(placed_order, 'model_dump') else placed_order
-
-            # Попытка получить ID из разных полей
-            order_id = 'unknown'
+            
+            # Добавляем order_id в словарь для удобства
             if isinstance(order_dict, dict):
-                order_id = order_dict.get('id') or order_dict.get('order_id') or order_dict.get('orderId', 'unknown')
-            elif hasattr(placed_order, 'id'):
-                order_id = placed_order.id
-            elif hasattr(placed_order, 'order_id'):
-                order_id = placed_order.order_id
+                order_dict['id'] = order_id
 
-            self.logger.debug(
-                f"{self.account_config.name} | Ордер размещен: ID={order_id}"
-            )
+            # Не логируем order_id т.к. IOC ордера исполняются мгновенно
+            # и API не успевает их индексировать (get_order_by_id возвращает 404)
 
             return order_dict
 
@@ -415,10 +553,9 @@ class ExtendedClient:
                 raise
             else:
                 # Логируем все остальные ошибки
-                self.logger.error(f"{self.account_config.name} | Ошибка размещения ордера: {e}")
+                self.logger.error(f"{self.account_config.name} | Ошибка размещения ордера: {type(e).__name__}: {str(e)}")
+                self.logger.error(f"Traceback: {traceback.format_exc()}")
                 raise
-        finally:
-            self._clear_proxy()
 
     async def place_limit_order(
         self,
@@ -448,7 +585,6 @@ class ExtendedClient:
         await self._ensure_initialized()
 
         try:
-            self._set_proxy()
             # Конвертируем строку в OrderSide enum
             order_side = OrderSide.BUY if side.upper() == "BUY" else OrderSide.SELL
 
@@ -474,34 +610,18 @@ class ExtendedClient:
                 time_in_force=tif
             )
 
-            # Конвертируем WrappedApiResponse в словарь
+            # Получаем order_id напрямую из response.data.id (как в extended_v0.55)
+            order_id = placed_order.data.id if hasattr(placed_order, 'data') and hasattr(placed_order.data, 'id') else 'unknown'
+            
+            # Конвертируем в словарь для возврата
             order_dict = placed_order.model_dump() if hasattr(placed_order, 'model_dump') else placed_order
-
-            # Debug: Логируем структуру ответа
-            self.logger.debug(
-                f"{self.account_config.name} | Структура ответа: тип={type(order_dict)}, "
-                f"ключи={list(order_dict.keys()) if isinstance(order_dict, dict) else 'N/A'}"
-            )
-
-            # Попытка получить ID из разных полей
-            order_id = 'unknown'
+            
+            # Добавляем order_id в словарь для удобства
             if isinstance(order_dict, dict):
-                # Проверяем все возможные варианты ключей для ID
-                order_id = (
-                    order_dict.get('id') or
-                    order_dict.get('order_id') or
-                    order_dict.get('orderId') or
-                    order_dict.get('clientOrderId') or
-                    order_dict.get('client_order_id') or
-                    'unknown'
-                )
-            elif hasattr(placed_order, 'id'):
-                order_id = placed_order.id
-            elif hasattr(placed_order, 'order_id'):
-                order_id = placed_order.order_id
+                order_dict['id'] = order_id
 
-            self.logger.debug(
-                f"Ордер размещен: ID={order_id}"
+            self.logger.info(
+                f"{self.account_config.name} | Лимит-ордер размещен: ID={order_id}"
             )
 
             return order_dict
@@ -513,8 +633,6 @@ class ExtendedClient:
             self.logger.error(f"Ошибка размещения лимит-ордера: {error_msg}")
             self.logger.debug(f"Traceback: {traceback.format_exc()}")
             raise
-        finally:
-            self._clear_proxy()
 
     async def get_open_orders(self, market: str = None, market_data_provider=None) -> List[Dict[str, Any]]:
         """
@@ -574,15 +692,12 @@ class ExtendedClient:
         await self._ensure_initialized()
 
         try:
-            self._set_proxy()
             await self.trading_client.orders.cancel_order(order_id=order_id)
             self.logger.debug(f"{self.account_config.name} | Ордер {order_id} отменен")
             return True
         except Exception as e:
             self.logger.debug(f"{self.account_config.name} | Ошибка отмены ордера {order_id}: {e}")
             return False
-        finally:
-            self._clear_proxy()
 
     async def cancel_all_orders(self, market: str = None, market_data_provider=None) -> int:
         """
@@ -629,7 +744,6 @@ class ExtendedClient:
         await self._ensure_initialized()
 
         try:
-            self._set_proxy()
             leverage_info = await self.trading_client.account.get_leverage()
             # Фильтруем по рынку если нужно
             if market and isinstance(leverage_info, dict):
@@ -638,8 +752,6 @@ class ExtendedClient:
         except Exception as e:
             self.logger.error(f"Ошибка получения leverage: {e}")
             raise
-        finally:
-            self._clear_proxy()
 
     async def update_leverage(self, market: str, leverage: int) -> bool:
         """
@@ -655,7 +767,6 @@ class ExtendedClient:
         await self._ensure_initialized()
 
         try:
-            self._set_proxy()
             await self.trading_client.account.update_leverage(
                 market_name=market,
                 leverage=Decimal(leverage)
@@ -665,8 +776,6 @@ class ExtendedClient:
         except Exception as e:
             self.logger.error(f"{self.account_config.name} | Ошибка leverage: {e}")
             return False
-        finally:
-            self._clear_proxy()
 
     async def _ensure_initialized(self):
         """Убедиться что клиент инициализирован"""
@@ -745,6 +854,15 @@ class ExtendedClient:
 
             except Exception as e:
                 self.logger.debug(f"{self.account_config.name}: не удалось закрыть SDK клиент: {e}")
+
+            # Закрываем per-client aiohttp сессию
+            if self._custom_session:
+                try:
+                    await self._custom_session.close()
+                    self.logger.debug(f"{self.account_config.name}: Per-client сессия закрыта")
+                except Exception as e:
+                    self.logger.debug(f"{self.account_config.name}: ошибка закрытия per-client сессии: {e}")
+                self._custom_session = None
 
             # Явно очищаем ссылку на клиент
             self.trading_client = None

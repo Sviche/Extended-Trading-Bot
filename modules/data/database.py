@@ -740,7 +740,7 @@ class DatabaseManager:
                 return stats
 
             with open(private_keys_file, 'r', encoding='utf-8') as f:
-                eth_keys = [line.strip() for line in f if line.strip()]
+                eth_keys = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
 
             stats['total'] = len(eth_keys)
 

@@ -58,7 +58,7 @@ async def onboard_and_save_to_db(
         return
 
     with open(private_keys_file, 'r', encoding='utf-8') as f:
-        eth_keys = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
+        eth_keys = [line.strip() for line in f if line.strip()]
 
     if not eth_keys:
         logger.error("Не найдено приватных ключей в файле!")

@@ -4,6 +4,7 @@ Market Data - Получение рыночных данных из Extended API
 """
 
 import aiohttp
+import traceback
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
@@ -241,10 +242,12 @@ class MarketDataProvider:
                 return data.get('data', {})
 
         except aiohttp.ClientError as e:
-            self.logger.error(f"HTTP error: {e}")
+            self.logger.error(f"HTTP error: {type(e).__name__}: {str(e)}")
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
             raise
         except Exception as e:
-            self.logger.error(f"Request error: {e}")
+            self.logger.error(f"Request error: {type(e).__name__}: {str(e)}")
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
             raise
 
     async def get_orderbook(self, market: str) -> Orderbook:
@@ -294,7 +297,8 @@ class MarketDataProvider:
             return orderbook
 
         except Exception as e:
-            self.logger.error(f"Ошибка получения orderbook {market}: {e}")
+            self.logger.error(f"Ошибка получения orderbook {market}: {type(e).__name__}: {str(e)}")
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
             raise
 
     async def get_market_stats(self, market: str) -> MarketStats:
@@ -365,6 +369,9 @@ class MarketDataProvider:
         """
         Получить цену для размещения маркет-ордера
 
+        ВАЖНО: Использует market_stats вместо orderbook, т.к. orderbook endpoint 
+        не работает стабильно через прокси (таймауты).
+
         Args:
             market: Название рынка
             side: Направление ("BUY" или "SELL")
@@ -374,29 +381,32 @@ class MarketDataProvider:
             Цена для ордера
         """
         try:
-            orderbook = await self.get_orderbook(market)
+            # Получаем market stats (вместо orderbook - работает быстрее и стабильнее)
+            stats = await self.get_market_stats(market)
 
             if side.upper() == "BUY":
-                # Покупка - берем лучший ask
-                base_price = orderbook.best_ask()
-                if base_price is None:
-                    raise Exception(f"No asks in orderbook for {market}")
+                # Покупка - берем ask_price из stats
+                base_price = stats.ask_price
+                if base_price is None or base_price == 0:
+                    # Fallback на mark_price если ask отсутствует
+                    base_price = stats.mark_price
 
-                # Агрессивная цена: +0.75% от лучшего ask
+                # Агрессивная цена: +1% от ask для гарантированного исполнения
                 if aggressive:
-                    price = base_price * Decimal('1.0075')
+                    price = base_price * Decimal('1.01')
                 else:
                     price = base_price
 
             else:  # SELL
-                # Продажа - берем лучший bid
-                base_price = orderbook.best_bid()
-                if base_price is None:
-                    raise Exception(f"No bids in orderbook for {market}")
+                # Продажа - берем bid_price из stats
+                base_price = stats.bid_price
+                if base_price is None or base_price == 0:
+                    # Fallback на mark_price если bid отсутствует
+                    base_price = stats.mark_price
 
-                # Агрессивная цена: -0.75% от лучшего bid
+                # Агрессивная цена: -1% от bid для гарантированного исполнения
                 if aggressive:
-                    price = base_price * Decimal('0.9925')
+                    price = base_price * Decimal('0.99')
                 else:
                     price = base_price
 
@@ -409,8 +419,9 @@ class MarketDataProvider:
 
         except Exception as e:
             self.logger.error(
-                f"Ошибка получения цены для {side} {market}: {e}"
+                f"Ошибка получения цены для {side} {market}: {type(e).__name__}: {str(e)}"
             )
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
             raise
 
     async def get_positions_rest(

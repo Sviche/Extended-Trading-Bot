@@ -149,35 +149,72 @@ def install_sdk_proxy_patch() -> bool:
         # Создаем patched версию
         async def patched_get_session(self):
             """
-            Patched версия get_session с поддержкой per-account прокси.
+            Patched версия get_session с поддержкой per-client сессий.
 
-            Если установлен текущий прокси через set_current_proxy(),
-            создает сессию с ProxyConnector. Иначе использует оригинальную логику.
+            НОВАЯ ЛОГИКА:
+            1. Если у клиента есть self._custom_session (создан ExtendedClient), использует его
+            2. Иначе использует старую логику с глобальным прокси (для обратной совместимости)
+            
+            Это устраняет race condition т.к. каждый клиент использует СВОЮ сессию.
             """
-            # Проверяем есть ли уже сессия
-            if self._BaseModule__session is not None:
-                return self._BaseModule__session
-
-            # Получаем текущий прокси
+            # ПРИОРИТЕТ 1: Если есть кастомная сессия (per-client), используем её
+            has_custom = hasattr(self, '_custom_session')
+            logger.debug(f"patched_get_session вызван: self={type(self).__name__}, has_custom={has_custom}")
+            
+            if has_custom:
+                custom_session = self._custom_session
+                logger.debug(f"_custom_session найден: {custom_session is not None}, session_id={id(custom_session)}")
+                if custom_session is not None:
+                    # Логируем connector прокси если есть
+                    connector = custom_session.connector
+                    proxy_info = "unknown"
+                    if connector and hasattr(connector, '_proxy_url'):
+                        proxy_info = mask_proxy_url(str(connector._proxy_url)) if connector._proxy_url else "no proxy"
+                    logger.debug(f"Использую per-client сессию id={id(custom_session)}, proxy={proxy_info}")
+                    return custom_session
+            
+            # ПРИОРИТЕТ 2: Старая логика с глобальным прокси (для обратной совместимости)
+            # Получаем текущий прокси из thread-local
             current_proxy = get_current_proxy()
-
-            if current_proxy:
-                # Создаем сессию с прокси
-                try:
-                    connector = ProxyConnector.from_url(current_proxy)
-                    self._BaseModule__session = aiohttp.ClientSession(
-                        connector=connector,
-                        timeout=CLIENT_TIMEOUT,
-                        trust_env=False  # Игнорируем системные прокси
-                    )
-                    logger.debug(f"SDK сессия создана с прокси: {mask_proxy_url(current_proxy)}")
-                except Exception as e:
-                    logger.error(f"Ошибка создания SDK сессии с прокси: {e}")
-                    # Fallback на оригинальную логику
+            
+            # Проверяем нужно ли пересоздать сессию
+            session_proxy = getattr(self, '_session_proxy', None)
+            need_recreate = (
+                self._BaseModule__session is None or 
+                session_proxy != current_proxy
+            )
+            
+            if need_recreate:
+                # Закрываем старую сессию если есть
+                if self._BaseModule__session is not None:
+                    try:
+                        await self._BaseModule__session.close()
+                        logger.debug("Старая SDK сессия закрыта")
+                    except Exception as e:
+                        logger.warning(f"Ошибка закрытия старой сессии: {e}")
+                
+                # Создаем новую сессию
+                if current_proxy:
+                    # Создаем сессию с прокси
+                    try:
+                        connector = ProxyConnector.from_url(current_proxy)
+                        self._BaseModule__session = aiohttp.ClientSession(
+                            connector=connector,
+                            timeout=CLIENT_TIMEOUT,
+                            trust_env=False  # Игнорируем системные прокси
+                        )
+                        logger.debug(f"SDK сессия создана с прокси: {mask_proxy_url(current_proxy)}")
+                    except Exception as e:
+                        logger.error(f"Ошибка создания SDK сессии с прокси: {e}")
+                        # Fallback на оригинальную логику
+                        self._BaseModule__session = aiohttp.ClientSession(timeout=CLIENT_TIMEOUT)
+                else:
+                    # Без прокси - оригинальная логика
                     self._BaseModule__session = aiohttp.ClientSession(timeout=CLIENT_TIMEOUT)
-            else:
-                # Без прокси - оригинальная логика
-                self._BaseModule__session = aiohttp.ClientSession(timeout=CLIENT_TIMEOUT)
+                    logger.debug("SDK сессия создана БЕЗ прокси")
+                
+                # Сохраняем текущий прокси для проверки в следующий раз
+                self._session_proxy = current_proxy
 
             return self._BaseModule__session
 

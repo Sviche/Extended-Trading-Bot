@@ -158,6 +158,19 @@ class BatchGenerator:
         # BatchGenerator остановлен
 
 
+# Глобальный счетчик батчей (thread-safe через asyncio)
+_batch_counter = 0
+_batch_counter_lock = asyncio.Lock()
+
+
+async def get_next_batch_number() -> int:
+    """Получить следующий номер батча (потокобезопасно)"""
+    global _batch_counter
+    async with _batch_counter_lock:
+        _batch_counter += 1
+        return _batch_counter
+
+
 class TradingWorker:
     """
     Воркер для обработки торговых задач
@@ -316,12 +329,16 @@ class TradingWorker:
         longs = accounts[:long_count]
         shorts = accounts[long_count:]
 
+        # Получить номер батча
+        batch_number = await get_next_batch_number()
+
         # Создать AccountBatch
         batch = AccountBatch(
             long_accounts=longs,
             short_accounts=shorts,
             market=task.market.replace('-USD', ''),  # Убираем суффикс для batch
-            created_at=datetime.now()
+            created_at=datetime.now(),
+            batch_number=batch_number
         )
 
         # Выполнить торговлю через BatchTrader
