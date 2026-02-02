@@ -44,7 +44,7 @@ The bot uses batch account processing (batch trading) with automatic long/short 
 ## 🛠️ Core Capabilities
 
 ### Trading Features
-- ✅ Batch trading (5-7 accounts per batch)
+- ✅ Batch trading (3+ accounts per batch)
 - ✅ Limit orders with adaptive offset and retry logic (up to 5 attempts)
 - ✅ Market orders via IOC for fast execution
 - ✅ Automatic position management (TP/SL/time-based)
@@ -102,7 +102,7 @@ python main.py
 - Python 3.10 or higher
 - Ethereum private keys (to create StarkNet accounts)
 - HTTP/SOCKS5 proxies (one per account)
-- Minimum 5-7 accounts to work in batch mode
+- Minimum 3-4 accounts to work in batch mode
 
 ---
 
