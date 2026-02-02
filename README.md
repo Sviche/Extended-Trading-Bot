@@ -127,7 +127,7 @@ Accounts → Cooldown → Available
 ## 💡 Economics
 
 ### LIMIT Mode (default)
-- Fee: **~0.02%** (Maker)
+- Fee: **~0%** (Maker)
 - Speed: ~100s per position
 - Savings: **$30/day** at $100k/day volume
 
