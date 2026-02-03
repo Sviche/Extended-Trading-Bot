@@ -67,11 +67,19 @@
 ## ⚙️ Быстрый старт
 
 ### 1. Установка зависимостей
-### 1. Install Dependencies
+
 ```bash
 python -m venv venv
 
 .\venv\Scripts\activate.bat
+
+pip install -r requirements.txt
+
+# OR
+
+git clone https://github.com/Sviche/Extended-Trading-Bot.git
+
+cd Extended-Trading-Bot
 
 pip install -r requirements.txt
 
