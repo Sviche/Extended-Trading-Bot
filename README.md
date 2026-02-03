@@ -73,6 +73,15 @@ python -m venv venv
 .\venv\Scripts\activate.bat
 
 pip install -r requirements.txt
+
+# OR
+
+git clone https://github.com/Sviche/Extended-Trading-Bot.git
+
+cd Extended-Trading-Bot
+
+pip install -r requirements.txt
+
 # or use setup.bat on Windows
 ```
 
