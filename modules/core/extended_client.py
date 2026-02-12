@@ -14,6 +14,10 @@ from x10.perpetual.accounts import StarkPerpetualAccount
 from x10.perpetual.configuration import MAINNET_CONFIG, TESTNET_CONFIG
 from x10.perpetual.trading_client import PerpetualTradingClient
 from x10.perpetual.orders import OrderSide, TimeInForce
+from x10.perpetual.order_object_settlement import create_order_settlement_data, SettlementDataCtx
+from x10.perpetual.fees import DEFAULT_FEES
+from x10.utils.nonce import generate_nonce
+from x10.utils.date import to_epoch_millis, utc_now
 from x10.utils.http import CLIENT_TIMEOUT
 
 import aiohttp
@@ -633,6 +637,174 @@ class ExtendedClient:
             self.logger.error(f"Ошибка размещения лимит-ордера: {error_msg}")
             self.logger.debug(f"Traceback: {traceback.format_exc()}")
             raise
+
+    async def place_stop_loss(
+        self,
+        market: str,
+        position_side: str,
+        entry_price: Decimal,
+        leverage: Decimal,
+        sl_percent: Decimal,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Разместить нативный биржевой стоплосс (TPSL POSITION ордер).
+
+        Создаёт standalone TPSL ордер на бирже, который срабатывает серверно
+        при достижении trigger price. Не требует клиентского мониторинга.
+
+        Args:
+            market: Рынок (например "BTC-USD")
+            position_side: Сторона позиции ("LONG" или "SHORT")
+            entry_price: Цена входа (openPrice из позиции)
+            leverage: Плечо позиции
+            sl_percent: % PnL для SL (отрицательное, например Decimal('-70'))
+
+        Returns:
+            Dict с данными размещённого ордера или None при ошибке
+        """
+        await self._ensure_initialized()
+
+        try:
+            # === 1. Расчёт триггерной и исполнительной цены ===
+            # PnL% = (mark - entry) / entry * leverage * 100 для LONG
+            # PnL% = (entry - mark) / entry * leverage * 100 для SHORT
+            # Решаем для mark (trigger price):
+            leverage_d = Decimal(str(leverage))
+            abs_sl = abs(sl_percent)
+
+            if position_side == 'LONG':
+                # При падении цены SL закрывает LONG продажей
+                trigger_price = entry_price * (Decimal('1') - abs_sl / (leverage_d * Decimal('100')))
+                sl_side = 'SELL'
+                # Исполнительная цена хуже (ниже) триггера — даём запас на проскальзывание
+                slippage = Decimal('0.0075')
+                exec_price = trigger_price * (Decimal('1') - slippage)
+            else:
+                # При росте цены SL закрывает SHORT покупкой
+                trigger_price = entry_price * (Decimal('1') + abs_sl / (leverage_d * Decimal('100')))
+                sl_side = 'BUY'
+                slippage = Decimal('0.0075')
+                exec_price = trigger_price * (Decimal('1') + slippage)
+
+            # Округляем цены до допустимой точности рынка
+            trigger_price = market_rules.round_price_to_min_change(market, trigger_price)
+            exec_price = market_rules.round_price_to_min_change(market, exec_price)
+
+            # === 2. Получаем Market Model для крипто-подписи ===
+            market_model = self.trading_client._PerpetualTradingClient__markets.get(market)
+            if not market_model:
+                self.logger.error(f"{self.account_config.name} | Market model не найден для {market}")
+                return None
+
+            # Максимальный размер для MARKET SL (биржа заполнит только реальный размер позиции)
+            max_value = getattr(market_model.trading_config, 'max_market_order_value', None)
+            if not max_value or max_value <= 0:
+                max_value = Decimal('3000000000')  # Фоллбэк ~$3B
+            max_synthetic = max_value / exec_price
+
+            # === 3. Строим контекст для Stark-подписи ===
+            fees = self.stark_account.trading_fee.get(market, DEFAULT_FEES)
+            nonce = generate_nonce()
+            expire_time = utc_now() + timedelta(days=90)
+
+            sl_order_side = OrderSide.SELL if sl_side == 'SELL' else OrderSide.BUY
+
+            ctx = SettlementDataCtx(
+                market=market_model,
+                fees=fees,
+                builder_fee=None,
+                nonce=nonce,
+                collateral_position_id=self.stark_account.vault,
+                expire_time=expire_time,
+                signer=self.stark_account.sign,
+                public_key=self.stark_account.public_key,
+                starknet_domain=self.config.starknet_domain,
+            )
+
+            # === 4. Создаём settlement (подпись) для SL ордера ===
+            sl_settlement = create_order_settlement_data(
+                side=sl_order_side,
+                synthetic_amount=max_synthetic,
+                price=exec_price,
+                ctx=ctx,
+            )
+
+            # === 5. Формируем JSON запрос (raw dict, как отправляет фронтенд) ===
+            # Конвертируем settlement в JSON-совместимый формат
+            settlement_json = sl_settlement.settlement.to_api_request_json()
+            debugging_json = sl_settlement.debugging_amounts.to_api_request_json()
+
+            order_payload = {
+                "id": str(sl_settlement.order_hash),
+                "market": market,
+                "type": "TPSL",
+                "side": sl_side,
+                "qty": "0",
+                "price": "0",
+                "timeInForce": "GTT",
+                "expiryEpochMillis": to_epoch_millis(expire_time),
+                "fee": str(fees.taker_fee_rate),
+                "nonce": str(nonce),
+                "reduceOnly": True,
+                "postOnly": False,
+                "tpSlType": "POSITION",
+                "stopLoss": {
+                    "triggerPrice": str(trigger_price),
+                    "triggerPriceType": "LAST",
+                    "price": str(exec_price),
+                    "priceType": "MARKET",
+                    "settlement": settlement_json,
+                    "debuggingAmounts": debugging_json,
+                },
+                "debuggingAmounts": {
+                    "collateralAmount": "0",
+                    "feeAmount": "0",
+                    "syntheticAmount": "0",
+                },
+            }
+
+            # === 6. Отправляем через HTTP ===
+            session = await self.trading_client.orders.get_session()
+            url = f"{MAINNET_CONFIG.api_base_url}/user/order"
+
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "X-Api-Key": self.stark_account.api_key,
+            }
+
+            async with session.post(url, json=order_payload, headers=headers) as resp:
+                resp_text = await resp.text()
+
+                if resp.status == 200:
+                    import json
+                    resp_data = json.loads(resp_text)
+                    if resp_data.get('status') == 'OK':
+                        order_id = resp_data.get('data', {}).get('id', 'unknown')
+                        self.logger.info(
+                            f"🛡️ {self.account_config.name} | SL установлен: "
+                            f"{market} {position_side} → trigger={trigger_price}, "
+                            f"exec={exec_price}, ID={order_id}"
+                        )
+                        return resp_data
+                    else:
+                        error = resp_data.get('error', resp_text)
+                        self.logger.error(
+                            f"{self.account_config.name} | SL ордер отклонён: {error}"
+                        )
+                        return None
+                else:
+                    self.logger.error(
+                        f"{self.account_config.name} | SL HTTP ошибка {resp.status}: {resp_text[:200]}"
+                    )
+                    return None
+
+        except Exception as e:
+            self.logger.error(
+                f"{self.account_config.name} | Ошибка размещения SL: {type(e).__name__}: {e}"
+            )
+            self.logger.debug(f"Traceback: {traceback.format_exc()}")
+            return None
 
     async def get_open_orders(self, market: str = None, market_data_provider=None) -> List[Dict[str, Any]]:
         """

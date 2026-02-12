@@ -337,17 +337,22 @@ class BatchTrader:
         self.logger.info("=" * 60)
 
         try:
-            # Получаем leverage для рынка
-            leverage = TRADING_SETTINGS['leverage'].get(
+            # Получаем leverage для рынка (поддержка [min, max, step] и фиксированного значения)
+            leverage_config = TRADING_SETTINGS['leverage'].get(
                 batch.market,
                 TRADING_SETTINGS['leverage'].get('BTC', 10)
             )
 
-            # Устанавливаем leverage для всех аккаунтов
-            await self._set_leverage_for_batch(batch, leverage)
+            # Устанавливаем leverage для всех аккаунтов (с рандомизацией если задан диапазон)
+            await self._set_leverage_for_batch(batch, leverage_config)
 
             # Открываем позиции
             await self._open_positions(batch)
+
+            # Устанавливаем нативные стоплоссы на бирже (если включены)
+            sl_enabled = POSITION_MANAGEMENT.get('stop_loss_enabled', False)
+            if sl_enabled:
+                await self._place_native_stop_losses(batch)
 
             # Мониторим позиции
             await self._monitor_positions(batch)
@@ -355,23 +360,127 @@ class BatchTrader:
         except Exception as e:
             self.logger.error(f"Ошибка торговли пачки: {e}")
 
-    async def _set_leverage_for_batch(self, batch: AccountBatch, leverage: int):
-        """Установить leverage для всех аккаунтов пачки"""
-        self.logger.info(f"Установка leverage {leverage}x для {batch.market}")
+    @staticmethod
+    def _resolve_leverage(leverage_config) -> int:
+        """
+        Разрешить конфиг leverage в конкретное значение.
+        Поддерживает:
+          - int/float: фиксированный leverage (50 → 50)
+          - list [min, max, step]: рандомный leverage из диапазона ([40, 50, 1] → 40..50)
+        """
+        if isinstance(leverage_config, (int, float)):
+            return int(leverage_config)
+        elif isinstance(leverage_config, (list, tuple)) and len(leverage_config) >= 2:
+            lev_min = int(leverage_config[0])
+            lev_max = int(leverage_config[1])
+            step = int(leverage_config[2]) if len(leverage_config) >= 3 else 1
+            # Генерируем список возможных значений с учётом шага
+            possible_values = list(range(lev_min, lev_max + 1, step))
+            if not possible_values:
+                return lev_min
+            return random.choice(possible_values)
+        else:
+            return int(leverage_config) if leverage_config else 10
+
+    async def _set_leverage_for_batch(self, batch: AccountBatch, leverage_config):
+        """
+        Установить leverage для всех аккаунтов пачки.
+        Каждый аккаунт получает свой рандомный leverage из диапазона (анти-сибил).
+        """
+        if isinstance(leverage_config, (list, tuple)):
+            self.logger.info(
+                f"Установка leverage [{leverage_config[0]}-{leverage_config[1]}]x для {batch.market}"
+            )
+        else:
+            self.logger.info(f"Установка leverage {leverage_config}x для {batch.market}")
 
         tasks = []
         all_accounts = batch.long_accounts + batch.short_accounts
+        market_name = f"{batch.market}-USD"
 
         for account in all_accounts:
             client = self.clients[account.name]
-            # Добавляем -USD суффикс для API
-            market_name = f"{batch.market}-USD"
-            tasks.append(client.update_leverage(market_name, leverage))
+            # Каждый аккаунт получает свой рандомный leverage
+            account_leverage = self._resolve_leverage(leverage_config)
+            self.logger.debug(f"{account.name}: leverage = {account_leverage}x")
+            tasks.append(client.update_leverage(market_name, account_leverage))
 
         try:
             await asyncio.gather(*tasks, return_exceptions=True)
         except Exception as e:
             self.logger.warning(f"Ошибка установки leverage: {e}")
+
+    async def _place_native_stop_losses(self, batch: AccountBatch):
+        """
+        Установить нативные биржевые стоплоссы для всех позиций пачки.
+
+        После открытия позиций:
+        1. Запрашивает данные каждой позиции (entry price, leverage, side)
+        2. Рассчитывает trigger price из stop_loss_percent и leverage
+        3. Отправляет TPSL POSITION ордер на биржу (серверный SL)
+
+        Если SL не удалось установить — клиентский мониторинг остаётся как фоллбэк.
+        """
+        sl_percent = Decimal(str(POSITION_MANAGEMENT.get('stop_loss_percent', -70)))
+        market_name = f"{batch.market}-USD"
+        all_accounts = batch.long_accounts + batch.short_accounts
+
+        self.logger.info(f"🛡️ Установка нативных SL ({sl_percent}% PnL) для {len(all_accounts)} аккаунтов...")
+
+        sl_success = 0
+        sl_failed = 0
+
+        for account in all_accounts:
+            try:
+                client = self.clients[account.name]
+
+                # Получаем текущую позицию
+                try:
+                    positions = await self.market_data.get_positions_rest(
+                        api_key=account.api_key,
+                        market=market_name
+                    )
+                except Exception:
+                    positions = await client.get_positions(market=market_name)
+
+                if not positions:
+                    self.logger.debug(f"{account.name}: нет позиции для SL")
+                    continue
+
+                position = positions[0]
+                pos_side = position.get('side', 'UNKNOWN')
+                entry_price = Decimal(str(position.get('openPrice', 0)))
+                leverage = Decimal(str(position.get('leverage', 1)))
+
+                if entry_price <= 0 or leverage <= 0:
+                    self.logger.warning(f"{account.name}: некорректные данные позиции для SL")
+                    continue
+
+                # Ставим нативный SL через API
+                result = await client.place_stop_loss(
+                    market=market_name,
+                    position_side=pos_side,
+                    entry_price=entry_price,
+                    leverage=leverage,
+                    sl_percent=sl_percent,
+                )
+
+                if result:
+                    sl_success += 1
+                else:
+                    sl_failed += 1
+
+            except Exception as e:
+                self.logger.error(f"{account.name}: ошибка установки SL: {e}")
+                sl_failed += 1
+
+            # Небольшая задержка между SL ордерами
+            await asyncio.sleep(0.5)
+
+        self.logger.info(
+            f"🛡️ SL итого: установлено {sl_success}/{len(all_accounts)}"
+            + (f", ошибок: {sl_failed}" if sl_failed > 0 else "")
+        )
 
     async def _open_positions(self, batch: AccountBatch):
         """Открыть позиции для пачки"""
@@ -661,13 +770,18 @@ class BatchTrader:
 
     async def _monitor_positions(self, batch: AccountBatch):
         """
-        Мониторинг и закрытие позиций по таймеру
+        Мониторинг и закрытие позиций по таймеру или стоплоссу.
 
-        Позиции закрываются автоматически по истечении времени удержания.
-        TP/SL не используются.
+        Позиции закрываются:
+        - По таймеру (holding_time_range)
+        - По стоплоссу (если PnL% относительно маржи < stop_loss_percent)
         """
         market_name = f"{batch.market}-USD"
         all_accounts = batch.long_accounts + batch.short_accounts
+
+        # Настройки стоплосса
+        sl_enabled = POSITION_MANAGEMENT.get('stop_loss_enabled', False)
+        sl_percent = Decimal(str(POSITION_MANAGEMENT.get('stop_loss_percent', -70)))
 
         # Время начала и конца удержания
         start_time = datetime.now()
@@ -680,6 +794,8 @@ class BatchTrader:
         self.logger.info(f"{'─' * 55}")
         self.logger.info(f"📊 ПАЧКА #{batch.batch_number} | {batch.market} | {len(all_accounts)} акк ({batch.long_count}L/{batch.short_count}S)")
         self.logger.info(f"⏱️  Удержание: {hold_duration}с (до {end_time.strftime('%H:%M:%S')})")
+        if sl_enabled:
+            self.logger.info(f"🛡️  Стоплосс: {sl_percent}% PnL (нативный + клиентский фоллбэк)")
         self.logger.info(f"{'─' * 55}")
 
         monitor_interval = POSITION_MANAGEMENT['monitor_interval_sec']
@@ -784,7 +900,30 @@ class BatchTrader:
                         else:
                             short_positions_data.append(pos_data)
 
-                        # TP/SL не используются, закрытие только по таймеру
+                        # Проверка стоплосса (PnL% относительно маржи, с учётом плеча)
+                        if sl_enabled:
+                            margin_pnl_pct = self._calculate_pnl_percent_margin(position)
+                            if margin_pnl_pct <= sl_percent:
+                                acc_short = account_name.replace('Account_', '')
+                                self.logger.warning(
+                                    f"\ud83d\uded1 STOPLOSS {acc_short}: PnL {margin_pnl_pct:+.2f}% ≤ {sl_percent}% → закрытие!"
+                                )
+                                # Закрываем позицию немедленно
+                                try:
+                                    await self._close_position(
+                                        account=account,
+                                        market=market_name,
+                                        position=position
+                                    )
+                                    self.logger.info(
+                                        f"\u2705 {acc_short}: позиция закрыта по стоплоссу (PnL: ${pnl_value:+.2f})"
+                                    )
+                                except Exception as sl_err:
+                                    self.logger.error(
+                                        f"{acc_short}: ошибка закрытия по SL: {sl_err}"
+                                    )
+                                open_positions.discard(account_name)
+                                closed_this_iteration.append(account_name)
 
                     except Exception as e:
                         self.logger.error(
@@ -980,7 +1119,7 @@ class BatchTrader:
         self.logger.info(f"╚{'═' * width}╝")
 
     def _calculate_pnl_percent(self, position: Dict) -> Decimal:
-        """Вычислить PnL в процентах"""
+        """Вычислить PnL в процентах относительно стоимости позиции (без плеча)"""
         unrealized_pnl = Decimal(str(position.get('unrealisedPnl', 0)))
         value = Decimal(str(position.get('value', 1)))
 
@@ -988,6 +1127,36 @@ class BatchTrader:
             return Decimal('0')
 
         return (unrealized_pnl / value) * Decimal('100')
+
+    def _calculate_pnl_percent_margin(self, position: Dict) -> Decimal:
+        """
+        Вычислить PnL% относительно маржи (с учётом плеча).
+
+        PnL% = (unrealisedPnl / margin) * 100
+        Где margin = value / leverage.
+
+        Пример: позиция $200, leverage 50x, margin = $4
+        unrealised PnL = -$2.8 → PnL% = -2.8/4 * 100 = -70%
+        """
+        unrealized_pnl = Decimal(str(position.get('unrealisedPnl', 0)))
+        margin = Decimal(str(position.get('margin', 0)))
+
+        # Если margin есть в позиции — используем напрямую
+        if margin and margin != 0:
+            return (unrealized_pnl / margin) * Decimal('100')
+
+        # Фоллбэк: вычисляем через value / leverage
+        value = Decimal(str(position.get('value', 0)))
+        leverage = Decimal(str(position.get('leverage', 1)))
+
+        if value == 0 or leverage == 0:
+            return Decimal('0')
+
+        margin_calc = value / leverage
+        if margin_calc == 0:
+            return Decimal('0')
+
+        return (unrealized_pnl / margin_calc) * Decimal('100')
 
     async def _close_position(
         self,

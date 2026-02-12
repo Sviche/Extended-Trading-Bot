@@ -343,17 +343,15 @@ class TradingWorker:
 
         # Выполнить торговлю через BatchTrader
         try:
-            # Получаем leverage для рынка
+            # Получаем leverage для рынка (поддержка [min, max, step] и фиксированного)
             from settings import TRADING_SETTINGS
-            leverage = TRADING_SETTINGS['leverage'].get(
+            leverage_config = TRADING_SETTINGS['leverage'].get(
                 batch.market,
                 TRADING_SETTINGS['leverage'].get('BTC', 10)
             )
 
-            # 1. Установить leverage
-            await self.trader._set_leverage_for_batch(batch, leverage)
-
-            # 2. Открыть позиции
+            # 1. Установить leverage (рандомизация происходит внутри)
+            await self.trader._set_leverage_for_batch(batch, leverage_config)
             await self.trader._open_positions(batch)
             positions_opened = batch.total_accounts
 

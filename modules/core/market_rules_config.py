@@ -74,7 +74,7 @@ MARKET_RULES = {
         'max_limit_order': 2_000_000,
         'max_position': 4_200_000,
     },
-    '1000PEPE': {
+    'kPEPE': {
         'group': 2,
         'min_trade_size': '1000',
         'min_change_size': '100',
@@ -84,7 +84,7 @@ MARKET_RULES = {
         'max_limit_order': 2_000_000,
         'max_position': 4_200_000,
     },
-    '1000SHIB': {
+    'kSHIB': {
         'group': 2,
         'min_trade_size': '1000',
         'min_change_size': '100',
@@ -266,7 +266,7 @@ MARKET_RULES = {
         'max_limit_order': 1_000_000,
         'max_position': 2_100_000,
     },
-    '1000BONK': {
+    'kBONK': {
         'group': 3,
         'min_trade_size': '1000',
         'min_change_size': '100',
@@ -326,7 +326,7 @@ MARKET_RULES = {
         'max_limit_order': 1_000_000,
         'max_position': 2_100_000,
     },
-    '1000FLOKI': {
+    'kFLOKI': {
         'group': 3,
         'min_trade_size': '1000',
         'min_change_size': '100',
