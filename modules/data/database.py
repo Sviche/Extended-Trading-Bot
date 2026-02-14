@@ -748,7 +748,7 @@ class DatabaseManager:
             proxies = []
             if Path(proxies_file).exists():
                 with open(proxies_file, 'r', encoding='utf-8') as f:
-                    proxies = [line.strip() for line in f if line.strip()]
+                    proxies = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
 
             # Синхронизируем каждый ключ
             for idx, eth_key in enumerate(eth_keys):

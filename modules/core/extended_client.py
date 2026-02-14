@@ -6,6 +6,7 @@ Extended Client - Обертка для работы с Extended Protocol SDK
 import asyncio
 import os
 import traceback
+from datetime import timedelta
 from decimal import Decimal
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
@@ -645,6 +646,7 @@ class ExtendedClient:
         entry_price: Decimal,
         leverage: Decimal,
         sl_percent: Decimal,
+        position_size: Optional[Decimal] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Разместить нативный биржевой стоплосс (TPSL POSITION ордер).
@@ -652,41 +654,52 @@ class ExtendedClient:
         Создаёт standalone TPSL ордер на бирже, который срабатывает серверно
         при достижении trigger price. Не требует клиентского мониторинга.
 
+        Формат TPSL POSITION ордера (из API docs):
+        - type=TPSL, tpSlType=POSITION
+        - top-level qty=0, price=0 (позиция целиком)
+        - settlement только внутри stopLoss trigger
+
         Args:
             market: Рынок (например "BTC-USD")
             position_side: Сторона позиции ("LONG" или "SHORT")
             entry_price: Цена входа (openPrice из позиции)
             leverage: Плечо позиции
             sl_percent: % PnL для SL (отрицательное, например Decimal('-70'))
+            position_size: Размер позиции в базовом активе (из position['size'])
 
         Returns:
             Dict с данными размещённого ордера или None при ошибке
         """
         await self._ensure_initialized()
 
+        self.logger.info(
+            f"{self.account_config.name} | place_stop_loss вызван: "
+            f"market={market}, side={position_side}, entry={entry_price}, "
+            f"leverage={leverage}, sl%={sl_percent}"
+        )
+
         try:
+            from x10.perpetual.orders import (
+                OrderTriggerPriceType, OrderPriceType,
+            )
+            from x10.config import USER_AGENT
+            import json as json_module
+
             # === 1. Расчёт триггерной и исполнительной цены ===
-            # PnL% = (mark - entry) / entry * leverage * 100 для LONG
-            # PnL% = (entry - mark) / entry * leverage * 100 для SHORT
-            # Решаем для mark (trigger price):
             leverage_d = Decimal(str(leverage))
             abs_sl = abs(sl_percent)
 
             if position_side == 'LONG':
-                # При падении цены SL закрывает LONG продажей
                 trigger_price = entry_price * (Decimal('1') - abs_sl / (leverage_d * Decimal('100')))
-                sl_side = 'SELL'
-                # Исполнительная цена хуже (ниже) триггера — даём запас на проскальзывание
-                slippage = Decimal('0.0075')
+                sl_side = OrderSide.SELL
+                slippage = Decimal('0.02')  # 2% slippage для LIMIT SL
                 exec_price = trigger_price * (Decimal('1') - slippage)
             else:
-                # При росте цены SL закрывает SHORT покупкой
                 trigger_price = entry_price * (Decimal('1') + abs_sl / (leverage_d * Decimal('100')))
-                sl_side = 'BUY'
-                slippage = Decimal('0.0075')
+                sl_side = OrderSide.BUY
+                slippage = Decimal('0.02')  # 2% slippage для LIMIT SL
                 exec_price = trigger_price * (Decimal('1') + slippage)
 
-            # Округляем цены до допустимой точности рынка
             trigger_price = market_rules.round_price_to_min_change(market, trigger_price)
             exec_price = market_rules.round_price_to_min_change(market, exec_price)
 
@@ -696,18 +709,28 @@ class ExtendedClient:
                 self.logger.error(f"{self.account_config.name} | Market model не найден для {market}")
                 return None
 
-            # Максимальный размер для MARKET SL (биржа заполнит только реальный размер позиции)
-            max_value = getattr(market_model.trading_config, 'max_market_order_value', None)
-            if not max_value or max_value <= 0:
-                max_value = Decimal('3000000000')  # Фоллбэк ~$3B
-            max_synthetic = max_value / exec_price
+            # Размер для SL settlement — используем РЕАЛЬНЫЙ размер позиции
+            # Для TPSL POSITION exchange валидирует подпись по фактическому размеру
+            if position_size and position_size > 0:
+                sl_synthetic = position_size
+                self.logger.debug(
+                    f"{self.account_config.name} | SL: используем размер позиции = {sl_synthetic}"
+                )
+            else:
+                # Фоллбэк на макс. размер (менее надёжно)
+                max_value = getattr(market_model.trading_config, 'max_market_order_value', None)
+                if not max_value or max_value <= 0:
+                    max_value = Decimal('3000000')
+                sl_synthetic = max_value / exec_price
+                self.logger.warning(
+                    f"{self.account_config.name} | SL: position_size не передан, "
+                    f"используем max_synthetic = {sl_synthetic:.4f}"
+                )
 
             # === 3. Строим контекст для Stark-подписи ===
             fees = self.stark_account.trading_fee.get(market, DEFAULT_FEES)
             nonce = generate_nonce()
             expire_time = utc_now() + timedelta(days=90)
-
-            sl_order_side = OrderSide.SELL if sl_side == 'SELL' else OrderSide.BUY
 
             ctx = SettlementDataCtx(
                 market=market_model,
@@ -721,83 +744,106 @@ class ExtendedClient:
                 starknet_domain=self.config.starknet_domain,
             )
 
-            # === 4. Создаём settlement (подпись) для SL ордера ===
+            # === 4. Создаём settlement для SL trigger ===
             sl_settlement = create_order_settlement_data(
-                side=sl_order_side,
-                synthetic_amount=max_synthetic,
+                side=sl_side,
+                synthetic_amount=sl_synthetic,
                 price=exec_price,
                 ctx=ctx,
             )
 
-            # === 5. Формируем JSON запрос (raw dict, как отправляет фронтенд) ===
-            # Конвертируем settlement в JSON-совместимый формат
-            settlement_json = sl_settlement.settlement.to_api_request_json()
-            debugging_json = sl_settlement.debugging_amounts.to_api_request_json()
+            # === 5. Строим JSON payload напрямую (SDK не поддерживает TPSL POSITION) ===
+            # Формат: qty=0, price=0 на верхнем уровне; settlement только внутри stopLoss
+            sl_settlement_json = sl_settlement.settlement.to_api_request_json()
+            sl_debugging_json = (
+                sl_settlement.debugging_amounts.to_api_request_json()
+                if sl_settlement.debugging_amounts else None
+            )
 
-            order_payload = {
+            order_json = {
                 "id": str(sl_settlement.order_hash),
                 "market": market,
                 "type": "TPSL",
-                "side": sl_side,
+                "side": sl_side.value,
                 "qty": "0",
                 "price": "0",
+                "reduceOnly": True,
+                "postOnly": False,
                 "timeInForce": "GTT",
                 "expiryEpochMillis": to_epoch_millis(expire_time),
                 "fee": str(fees.taker_fee_rate),
                 "nonce": str(nonce),
-                "reduceOnly": True,
-                "postOnly": False,
                 "tpSlType": "POSITION",
                 "stopLoss": {
                     "triggerPrice": str(trigger_price),
                     "triggerPriceType": "LAST",
                     "price": str(exec_price),
-                    "priceType": "MARKET",
-                    "settlement": settlement_json,
-                    "debuggingAmounts": debugging_json,
-                },
-                "debuggingAmounts": {
-                    "collateralAmount": "0",
-                    "feeAmount": "0",
-                    "syntheticAmount": "0",
+                    "priceType": "LIMIT",
+                    "settlement": sl_settlement_json,
+                    "debuggingAmounts": sl_debugging_json,
                 },
             }
 
-            # === 6. Отправляем через HTTP ===
+            self.logger.info(
+                f"{self.account_config.name} | SL payload: "
+                f"type={order_json['type']}, side={order_json['side']}, "
+                f"trigger={order_json['stopLoss']['triggerPrice']}, "
+                f"exec={order_json['stopLoss']['price']}, "
+                f"market={order_json['market']}, tpSlType={order_json['tpSlType']}"
+            )
+            self.logger.debug(
+                f"{self.account_config.name} | SL full payload: "
+                f"{json_module.dumps(order_json, default=str)[:1500]}"
+            )
+
+            # === 6. Отправляем через HTTP (с таймаутом 30 сек) ===
             session = await self.trading_client.orders.get_session()
-            url = f"{MAINNET_CONFIG.api_base_url}/user/order"
+            url = f"{self.config.api_base_url}/user/order"
 
             headers = {
                 "Accept": "application/json",
                 "Content-Type": "application/json",
+                "User-Agent": USER_AGENT,
                 "X-Api-Key": self.stark_account.api_key,
             }
 
-            async with session.post(url, json=order_payload, headers=headers) as resp:
-                resp_text = await resp.text()
+            sl_timeout = aiohttp.ClientTimeout(total=30)
+            try:
+                async with session.post(
+                    url, json=order_json, headers=headers, timeout=sl_timeout
+                ) as resp:
+                    resp_text = await resp.text()
+                    self.logger.info(
+                        f"{self.account_config.name} | SL ответ: HTTP {resp.status}, body={resp_text[:500]}"
+                    )
 
-                if resp.status == 200:
-                    import json
-                    resp_data = json.loads(resp_text)
-                    if resp_data.get('status') == 'OK':
-                        order_id = resp_data.get('data', {}).get('id', 'unknown')
-                        self.logger.info(
-                            f"🛡️ {self.account_config.name} | SL установлен: "
-                            f"{market} {position_side} → trigger={trigger_price}, "
-                            f"exec={exec_price}, ID={order_id}"
-                        )
-                        return resp_data
+                    if resp.status == 200:
+                        resp_data = json_module.loads(resp_text)
+                        if resp_data.get('status') == 'OK':
+                            order_id = resp_data.get('data', {}).get('id', 'unknown')
+                            self.logger.info(
+                                f"🛡️ {self.account_config.name} | SL установлен: "
+                                f"{market} {position_side} → trigger={trigger_price}, "
+                                f"exec={exec_price}, ID={order_id}"
+                            )
+                            return resp_data
+                        else:
+                            error = resp_data.get('error', resp_text)
+                            self.logger.error(
+                                f"{self.account_config.name} | SL ордер отклонён: {error}"
+                            )
+                            return None
                     else:
-                        error = resp_data.get('error', resp_text)
                         self.logger.error(
-                            f"{self.account_config.name} | SL ордер отклонён: {error}"
+                            f"{self.account_config.name} | SL HTTP ошибка {resp.status}: {resp_text[:500]}"
                         )
                         return None
-                else:
-                    self.logger.error(
-                        f"{self.account_config.name} | SL HTTP ошибка {resp.status}: {resp_text[:200]}"
-                    )
-                    return None
+            except asyncio.TimeoutError:
+                self.logger.error(
+                    f"{self.account_config.name} | SL HTTP таймаут (30с) — пропуск, "
+                    "клиентский мониторинг SL продолжит работу"
+                )
+                return None
 
         except Exception as e:
             self.logger.error(

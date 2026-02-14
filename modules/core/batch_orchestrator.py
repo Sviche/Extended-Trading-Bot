@@ -355,6 +355,18 @@ class TradingWorker:
             await self.trader._open_positions(batch)
             positions_opened = batch.total_accounts
 
+            # 2. Установить нативные стоплоссы (TPSL POSITION) — ВРЕМЕННО ОТКЛЮЧЕНО
+            # from settings import POSITION_MANAGEMENT
+            # sl_enabled = POSITION_MANAGEMENT.get('stop_loss_enabled', False)
+            # logger.info(f"🛡️ SL enabled: {sl_enabled}")
+            # if sl_enabled:
+            #     try:
+            #         await self.trader._place_native_stop_losses(batch)
+            #     except Exception as e:
+            #         logger.error(f"❌ Ошибка установки нативных SL: {type(e).__name__}: {e}")
+            #         import traceback
+            #         logger.error(f"Traceback: {traceback.format_exc()}")
+
             # 3. Мониторить позиции (включает закрытие)
             await self.trader._monitor_positions(batch)
             positions_closed = batch.total_accounts
