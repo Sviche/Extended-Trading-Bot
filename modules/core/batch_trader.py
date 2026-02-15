@@ -31,6 +31,9 @@ from modules.helpers.market_rules import market_rules
 from modules.core.constants import RETRY_SETTINGS, LIMIT_ORDER_CONFIG, WEBSOCKET_CONFIG
 from settings import TRADING_SETTINGS, POSITION_MANAGEMENT, DELAYS
 
+from x10.perpetual.orders import OrderTpslType, OrderTriggerPriceType, OrderPriceType
+from x10.perpetual.order_object import OrderTpslTriggerParam
+
 
 def round_to_min_size(amount: Decimal, market: str) -> Decimal:
     """
@@ -347,20 +350,8 @@ class BatchTrader:
             await self._set_leverage_for_batch(batch, leverage_config)
 
             # Открываем позиции
+            # (SL прикрепляется к ордеру при создании — см. _open_position / _open_position_with_limit_retry)
             await self._open_positions(batch)
-
-            # === УСТАНОВКА НАТИВНЫХ СТОПЛОССОВ (ВРЕМЕННО ОТКЛЮЧЕНО) ===
-            # sl_enabled = POSITION_MANAGEMENT.get('stop_loss_enabled', False)
-            # self.logger.info(f"🛡️ SL enabled: {sl_enabled}")
-            # 
-            # if sl_enabled:
-            #     try:
-            #         await self._place_native_stop_losses(batch)
-            #     except Exception as e:
-            #         self.logger.error(f"❌ Критическая ошибка при установке SL: {type(e).__name__}: {e}")
-            #         self.logger.error(f"Traceback: {traceback.format_exc()}")
-            # else:
-            #     self.logger.warning("⚠️ Нативные SL отключены в настройках (stop_loss_enabled=False)")
 
             # Мониторим позиции
             await self._monitor_positions(batch)
@@ -429,100 +420,16 @@ class BatchTrader:
 
     async def _place_native_stop_losses(self, batch: AccountBatch):
         """
-        Установить нативные биржевые стоплоссы для всех позиций пачки.
+        DEPRECATED: SL теперь прикрепляется к ордеру при создании (ORDER TPSL).
 
-        После открытия позиций:
-        1. Запрашивает данные каждой позиции (entry price, leverage, side)
-        2. Рассчитывает trigger price из stop_loss_percent и leverage
-        3. Отправляет TPSL POSITION ордер на биржу (серверный SL)
+        Этот метод использовал неправильный подход — standalone POSITION TPSL
+        после открытия позиции. SDK не поддерживает POSITION TPSL.
 
-        Если SL не удалось установить — клиентский мониторинг остаётся как фоллбэк.
+        Оставлен для обратной совместимости, ничего не делает.
         """
-        sl_percent = Decimal(str(POSITION_MANAGEMENT.get('stop_loss_percent', -70)))
-        market_name = f"{batch.market}-USD"
-        all_accounts = batch.long_accounts + batch.short_accounts
-
-        self.logger.info(f"🛡️ Установка нативных SL ({sl_percent}% PnL) для {len(all_accounts)} аккаунтов...")
-
-        sl_success = 0
-        sl_failed = 0
-
-        for account in all_accounts:
-            try:
-                client = self.clients[account.name]
-
-                # Получаем текущую позицию (REST API возвращает camelCase, SDK — snake_case)
-                use_rest = True
-                try:
-                    positions = await self.market_data.get_positions_rest(
-                        api_key=account.api_key,
-                        market=market_name
-                    )
-                except Exception as e:
-                    self.logger.debug(f"{account.name}: REST API positions failed: {e}, trying SDK")
-                    use_rest = False
-                    positions = await client.get_positions(market=market_name)
-
-                if not positions:
-                    self.logger.warning(f"{account.name}: нет позиции для SL (пропуск)")
-                    continue
-
-                position = positions[0]
-                self.logger.debug(f"{account.name}: SL position data (rest={use_rest}): {position}")
-
-                # Извлекаем данные с поддержкой ОБОИХ форматов (camelCase и snake_case)
-                pos_side = position.get('side', 'UNKNOWN')
-
-                # openPrice (REST camelCase) или open_price (SDK snake_case)
-                entry_price_raw = position.get('openPrice') or position.get('open_price', 0)
-                entry_price = Decimal(str(entry_price_raw))
-
-                # leverage — одинаково в обоих форматах
-                leverage = Decimal(str(position.get('leverage', 1)))
-
-                # size — размер позиции в базовом активе
-                size_raw = position.get('size') or position.get('qty', 0)
-                position_size = abs(Decimal(str(size_raw))) if size_raw else Decimal('0')
-
-                self.logger.info(
-                    f"{account.name}: SL данные позиции: side={pos_side}, "
-                    f"entry={entry_price}, leverage={leverage}x, size={position_size}"
-                )
-
-                if entry_price <= 0 or leverage <= 0:
-                    self.logger.warning(
-                        f"{account.name}: некорректные данные позиции для SL "
-                        f"(entry={entry_price}, leverage={leverage}, size={position_size})"
-                    )
-                    continue
-
-                # Ставим нативный SL через API
-                result = await client.place_stop_loss(
-                    market=market_name,
-                    position_side=pos_side,
-                    entry_price=entry_price,
-                    leverage=leverage,
-                    sl_percent=sl_percent,
-                    position_size=position_size,
-                )
-
-                if result:
-                    sl_success += 1
-                else:
-                    sl_failed += 1
-                    self.logger.warning(f"{account.name}: place_stop_loss вернул None")
-
-            except Exception as e:
-                self.logger.error(f"{account.name}: ошибка установки SL: {type(e).__name__}: {e}")
-                self.logger.error(f"Traceback: {traceback.format_exc()}")
-                sl_failed += 1
-
-            # Небольшая задержка между SL ордерами
-            await asyncio.sleep(0.5)
-
-        self.logger.info(
-            f"🛡️ SL итого: установлено {sl_success}/{len(all_accounts)}"
-            + (f", ошибок: {sl_failed}" if sl_failed > 0 else "")
+        self.logger.warning(
+            "⚠️ _place_native_stop_losses DEPRECATED: SL теперь прикрепляется "
+            "к ордеру при создании через stop_loss параметр в place_limit_order/place_market_order"
         )
 
     async def _open_positions(self, batch: AccountBatch):
@@ -657,6 +564,118 @@ class BatchTrader:
             f"\n{'─'*60}\n"
         )
 
+    def _build_stop_loss_params(
+        self, side: str
+    ) -> tuple:
+        """
+        Построить параметры стоплосса для прикрепления к ордеру при создании.
+
+        SL прикрепляется к ордеру как ORDER TPSL (не standalone POSITION).
+        SDK создаёт корректную StarkNet подпись с общим nonce.
+
+        Trigger price рассчитывается ОТНОСИТЕЛЬНО цены ордера:
+        - trigger_price_type=LAST — биржа сработает при достижении LAST PRICE
+        - Для BUY (LONG): trigger = entry * (1 - |sl_percent| / (leverage * 100))
+        - Для SELL (SHORT): trigger = entry * (1 + |sl_percent| / (leverage * 100))
+
+        Мы НЕ ЗНАЕМ точную entry_price и leverage заранее (они определятся при исполнении).
+        Поэтому используем приблизительные значения из настроек для расчёта ratio,
+        а exec_price (LIMIT) ставим с запасом slippage от trigger_price.
+
+        Returns:
+            (OrderTpslTriggerParam, OrderTpslType) или (None, None) если SL отключён
+        """
+        sl_enabled = POSITION_MANAGEMENT.get('stop_loss_enabled', False)
+        if not sl_enabled:
+            return None, None
+
+        sl_percent = Decimal(str(POSITION_MANAGEMENT.get('stop_loss_percent', -70)))
+        abs_sl = abs(sl_percent)
+
+        # Slippage для LIMIT exec price (от trigger price)
+        slippage = Decimal('0.03')  # 3% slippage
+
+        # Для ORDER TPSL:
+        # trigger_price и exec_price задаются как АБСОЛЮТНЫЕ цены
+        # НО SDK рассчитывает settlement на основе exec_price
+        # trigger_price_type=LAST означает что биржа сравнивает с last price
+
+        # Мы НЕ можем задать trigger_price заранее без знания entry price
+        # Поэтому trigger_price будет рассчитан в _open_position_with_limit_retry
+        # и _open_position (MARKET path) где известна цена ордера
+
+        # Возвращаем None, но тип SL — ORDER
+        # Конкретные trigger/exec prices будут заданы в caller'ах
+        return None, OrderTpslType.ORDER
+
+    def _calculate_sl_trigger_param(
+        self,
+        side: str,
+        order_price: Decimal,
+        market: str,
+    ) -> Optional[OrderTpslTriggerParam]:
+        """
+        Рассчитать конкретные параметры SL для данной цены ордера.
+
+        Args:
+            side: Сторона ордера (BUY/SELL)
+            order_price: Цена ордера (лимитная или маркетная)
+            market: Рынок для округления цены
+
+        Returns:
+            OrderTpslTriggerParam или None если SL отключён
+        """
+        sl_enabled = POSITION_MANAGEMENT.get('stop_loss_enabled', False)
+        if not sl_enabled:
+            return None
+
+        sl_percent = Decimal(str(POSITION_MANAGEMENT.get('stop_loss_percent', -70)))
+        abs_sl = abs(sl_percent)
+        slippage = Decimal('0.03')  # 3% slippage для exec price
+
+        # Получаем leverage для расчёта trigger price
+        # Берём из TRADING_SETTINGS (может быть range — берём среднее)
+        market_short = market.replace('-USD', '')
+        leverage_config = TRADING_SETTINGS['leverage'].get(
+            market_short,
+            TRADING_SETTINGS['leverage'].get('BTC', 10)
+        )
+        if isinstance(leverage_config, (list, tuple)):
+            leverage = Decimal(str((leverage_config[0] + leverage_config[1]) // 2))
+        else:
+            leverage = Decimal(str(leverage_config))
+
+        if leverage <= 0:
+            leverage = Decimal('10')
+
+        if side == "BUY":
+            # LONG: SL ниже entry
+            trigger_price = order_price * (Decimal('1') - abs_sl / (leverage * Decimal('100')))
+            # Exec price ещё ниже trigger (slippage для гарантии исполнения)
+            exec_price = trigger_price * (Decimal('1') - slippage)
+        else:
+            # SHORT: SL выше entry
+            trigger_price = order_price * (Decimal('1') + abs_sl / (leverage * Decimal('100')))
+            # Exec price ещё выше trigger
+            exec_price = trigger_price * (Decimal('1') + slippage)
+
+        # Округляем до min_price_change
+        trigger_price = market_rules.round_price_to_min_change(market, trigger_price)
+        exec_price = market_rules.round_price_to_min_change(market, exec_price)
+
+        self.logger.debug(
+            f"SL params: side={side}, order_price={order_price}, "
+            f"leverage={leverage}x, sl%={sl_percent}, "
+            f"trigger={trigger_price}, exec={exec_price}"
+        )
+
+        return OrderTpslTriggerParam(
+            trigger_price=trigger_price,
+            trigger_price_type=OrderTriggerPriceType.LAST,
+            price=exec_price,
+            price_type=OrderPriceType.LIMIT,
+        )
+
     async def _open_position(
         self,
         account: AccountConfig,
@@ -676,6 +695,9 @@ class BatchTrader:
             order_type: Тип ордера (MARKET/LIMIT)
         """
         client = self.clients[account.name]
+
+        # Рассчитываем параметры стоплосса (если включён)
+        sl_param, sl_type = self._build_stop_loss_params(side)
 
         try:
             # Для лимитных ордеров используем retry логику
@@ -714,12 +736,23 @@ class BatchTrader:
             )
 
             if order_type == "MARKET":
+                # Рассчитываем SL trigger price на основе mark price
+                sl_trigger = self._calculate_sl_trigger_param(side, current_price, market) if sl_type else None
+
+                if sl_trigger:
+                    self.logger.info(
+                        f"{account.name}: SL прикреплён к ордеру: "
+                        f"trigger={sl_trigger.trigger_price}, exec={sl_trigger.price}"
+                    )
+
                 order = await client.place_market_order(
                     market=market,
                     side=side,
                     amount=amount,
                     market_data_provider=self.market_data,
-                    reduce_only=False
+                    reduce_only=False,
+                    stop_loss=sl_trigger,
+                    tp_sl_type=sl_type if sl_trigger else None,
                 )
             else:  # LIMIT
                 # Для лимитного ордера используем текущую цену с небольшим offset
@@ -731,13 +764,18 @@ class BatchTrader:
                 else:
                     limit_price = current_price * (Decimal('1') + offset_pct)
 
+                # Рассчитываем SL trigger price на основе limit price
+                sl_trigger = self._calculate_sl_trigger_param(side, limit_price, market) if sl_type else None
+
                 order = await client.place_limit_order(
                     market=market,
                     side=side,
                     amount=amount,
                     price=limit_price,
                     post_only=False,
-                    reduce_only=False
+                    reduce_only=False,
+                    stop_loss=sl_trigger,
+                    tp_sl_type=sl_type if sl_trigger else None,
                 )
 
             # Получаем ID ордера (только для внутренних целей, не логируем)
@@ -851,7 +889,12 @@ class BatchTrader:
 
         while open_positions and datetime.now() < end_time:
             try:
-                await asyncio.sleep(monitor_interval)
+                # Спим минимум из monitor_interval и оставшегося времени удержания
+                time_left_before_sleep = (end_time - datetime.now()).total_seconds()
+                if time_left_before_sleep <= 0:
+                    break
+                sleep_time = min(monitor_interval, time_left_before_sleep)
+                await asyncio.sleep(sleep_time)
                 iteration += 1
 
                 # Вычисляем оставшееся время
@@ -1243,15 +1286,38 @@ class BatchTrader:
                 f"(entry: {entry_price}, PnL: ${pnl_value:+.2f})"
             )
 
-            # Для лимитных ордеров используем retry логику
-            success = await self._close_position_with_limit_retry(
-                account=account,
-                market=market,
-                position=position
-            )
+            order_type = TRADING_SETTINGS.get('order_type', 'LIMIT')
 
-            if not success:
-                raise Exception("Failed to close position with limit orders")
+            if order_type == "MARKET":
+                # Маркет-ордер для закрытия
+                await client.place_market_order(
+                    market=market,
+                    side=close_side,
+                    amount=size_decimal,
+                    market_data_provider=self.market_data,
+                    reduce_only=True
+                )
+
+                # Проверяем что позиция закрылась
+                await asyncio.sleep(2)
+                positions = await client.get_positions(market=market)
+                if positions:
+                    self.logger.warning(
+                        f"{account.name}: позиция не закрылась маркет-ордером, повтор..."
+                    )
+                    raise Exception("Failed to close position with market order")
+
+                self.logger.info(f"✅ {account.name}: позиция закрыта маркет-ордером")
+            else:
+                # Для лимитных ордеров используем retry логику
+                success = await self._close_position_with_limit_retry(
+                    account=account,
+                    market=market,
+                    position=position
+                )
+
+                if not success:
+                    raise Exception("Failed to close position with limit orders")
 
             return
 
@@ -1532,6 +1598,20 @@ class BatchTrader:
                 price_display = float(limit_price)
                 market_short = market.replace('-USD', '')
 
+                # Рассчитываем SL для прикрепления к ордеру
+                sl_enabled = POSITION_MANAGEMENT.get('stop_loss_enabled', False)
+                sl_trigger = None
+                sl_type = None
+                if sl_enabled:
+                    sl_trigger = self._calculate_sl_trigger_param(side, limit_price, market)
+                    sl_type = OrderTpslType.ORDER if sl_trigger else None
+                    if sl_trigger:
+                        self.logger.info(
+                            f"{account.name} | 🛡️ SL прикреплён: "
+                            f"trigger={sl_trigger.trigger_price}, "
+                            f"exec={sl_trigger.price}"
+                        )
+
                 # Размещаем лимитный ордер
                 order = await client.place_limit_order(
                     market=market,
@@ -1539,7 +1619,9 @@ class BatchTrader:
                     amount=amount,
                     price=limit_price,
                     post_only=False,
-                    reduce_only=False
+                    reduce_only=False,
+                    stop_loss=sl_trigger,
+                    tp_sl_type=sl_type,
                 )
 
                 order_id = order.get('id') or order.get('order_id') or order.get('orderId', 'unknown')
@@ -2537,11 +2619,7 @@ class BatchTrader:
         try:
             # Округляем размер
             size = round_to_min_size(size, market)
-
-            # Закрываем лимитным ордером с retry логикой
-            self.logger.info(
-                f"{account_name}: закрытие лимитным ордером {market} {side} {size}"
-            )
+            order_type = TRADING_SETTINGS.get('order_type', 'LIMIT')
 
             # Находим аккаунт
             account = None
@@ -2554,30 +2632,63 @@ class BatchTrader:
                 self.logger.error(f"{account_name}: аккаунт не найден")
                 return False
 
-            # Формируем структуру позиции для метода
-            position = {
-                'side': 'LONG' if side == 'SELL' else 'SHORT',  # Обратная сторона
-                'size': float(size),
-                'market': market
-            }
-
-            # Используем существующий метод с retry логикой (3 попытки)
-            success = await self._close_position_with_limit_retry(
-                account=account,
-                market=market,
-                position=position
-            )
-
-            if success:
-                self.logger.success(
-                    f"{account_name}: позиция закрыта на {market}"
+            if order_type == "MARKET":
+                # Закрываем маркет-ордером
+                self.logger.info(
+                    f"{account_name}: закрытие маркет-ордером {market} {side} {size}"
                 )
-                return True
+
+                await client.place_market_order(
+                    market=market,
+                    side=side,
+                    amount=size,
+                    market_data_provider=self.market_data,
+                    reduce_only=True
+                )
+
+                await asyncio.sleep(2)
+
+                positions = await client.get_positions(market=market)
+                if not positions:
+                    self.logger.success(
+                        f"{account_name}: позиция закрыта на {market}"
+                    )
+                    return True
+                else:
+                    self.logger.warning(
+                        f"{account_name}: позиция {market} не закрылась маркет-ордером"
+                    )
+                    return False
             else:
-                self.logger.error(
-                    f"{account_name}: не удалось закрыть позицию на {market} после всех попыток"
+                # Закрываем лимитным ордером с retry логикой
+                self.logger.info(
+                    f"{account_name}: закрытие лимитным ордером {market} {side} {size}"
                 )
-                return False
+
+                # Формируем структуру позиции для метода
+                position = {
+                    'side': 'LONG' if side == 'SELL' else 'SHORT',  # Обратная сторона
+                    'size': float(size),
+                    'market': market
+                }
+
+                # Используем существующий метод с retry логикой (3 попытки)
+                success = await self._close_position_with_limit_retry(
+                    account=account,
+                    market=market,
+                    position=position
+                )
+
+                if success:
+                    self.logger.success(
+                        f"{account_name}: позиция закрыта на {market}"
+                    )
+                    return True
+                else:
+                    self.logger.error(
+                        f"{account_name}: не удалось закрыть позицию на {market} после всех попыток"
+                    )
+                    return False
 
         except Exception as e:
             self.logger.error(

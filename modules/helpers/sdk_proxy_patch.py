@@ -300,3 +300,139 @@ class SDKProxyContextSync:
     def __exit__(self, exc_type, exc_val, exc_tb):
         set_current_proxy(self.previous_proxy)
         return False
+
+
+# ============================================================================
+# SDK Market Order Patch
+# ============================================================================
+# x10 SDK всегда отправляет type=OrderType.LIMIT для ВСЕХ ордеров.
+# SDK также блокирует TimeInForce.FOK (Fill or Kill).
+# StarkNet подпись НЕ включает поле type, поэтому замена type безопасна.
+#
+# Этот патч добавляет метод place_market_order_native() к PerpetualTradingClient,
+# который создаёт ордер через стандартный SDK (валидная подпись),
+# затем меняет type на MARKET перед отправкой на биржу.
+# ============================================================================
+
+_market_order_patch_installed = False
+
+
+def install_sdk_market_order_patch() -> bool:
+    """
+    Установить monkey-patch для поддержки настоящих MARKET ордеров.
+
+    x10 SDK (x10-python-trading-starknet) имеет два ограничения:
+    1. create_order_object() всегда ставит type=OrderType.LIMIT
+    2. TimeInForce.FOK явно заблокирован ValueError
+
+    Этот патч добавляет метод place_market_order_native() к PerpetualTradingClient,
+    который:
+    1. Создаёт ордер через SDK (с IOC для прохождения валидации)
+    2. Меняет type на MARKET через model_copy() (безопасно: не входит в StarkNet подпись)
+    3. Отправляет на биржу через стандартный order management module
+
+    Returns:
+        True если патч установлен успешно
+    """
+    global _market_order_patch_installed
+
+    if _market_order_patch_installed:
+        logger.debug("SDK market order patch уже установлен")
+        return True
+
+    try:
+        from x10.perpetual.trading_client import PerpetualTradingClient
+        from x10.perpetual.order_object import create_order_object
+        from x10.perpetual.orders import OrderType, TimeInForce
+        from x10.utils.date import utc_now
+        from datetime import timedelta
+
+        async def place_market_order_native(
+            self,
+            market_name: str,
+            amount_of_synthetic,
+            price,
+            side,
+            reduce_only: bool = False,
+            expire_time=None,
+            stop_loss=None,
+            tp_sl_type=None,
+        ):
+            """
+            Разместить настоящий MARKET ордер на Extended Exchange.
+
+            Процесс:
+            1. Создаёт ордер через стандартный SDK (type=LIMIT, time_in_force=IOC)
+            2. Модифицирует type на MARKET через model_copy()
+               (безопасно т.к. type НЕ входит в StarkNet подпись/settlement)
+            3. Отправляет модифицированный ордер через стандартный API
+
+            Args:
+                market_name: Рынок (например "BTC-USD")
+                amount_of_synthetic: Количество базового актива
+                price: Агрессивная цена для исполнения
+                side: OrderSide.BUY или OrderSide.SELL
+                reduce_only: Только закрытие позиции
+                expire_time: Время истечения ордера
+
+            Returns:
+                WrappedApiResponse[PlacedOrderModel]
+            """
+            # Получаем приватные атрибуты через name mangling
+            stark_account = self._PerpetualTradingClient__stark_account
+            if not stark_account:
+                raise ValueError("Stark account is not set")
+
+            markets = self._PerpetualTradingClient__markets
+            if not markets:
+                markets = await self.markets_info.get_markets_dict()
+                self._PerpetualTradingClient__markets = markets
+
+            market = markets.get(market_name)
+            if not market:
+                raise ValueError(f"Market {market_name} not found")
+
+            config = self._PerpetualTradingClient__config
+
+            if expire_time is None:
+                expire_time = utc_now() + timedelta(hours=1)
+
+            # Шаг 1: Создаём ордер через SDK с IOC (SDK блокирует FOK)
+            order = create_order_object(
+                account=stark_account,
+                market=market,
+                amount_of_synthetic=amount_of_synthetic,
+                price=price,
+                side=side,
+                post_only=False,
+                expire_time=expire_time,
+                time_in_force=TimeInForce.IOC,
+                starknet_domain=config.starknet_domain,
+                reduce_only=reduce_only,
+                stop_loss=stop_loss,
+                tp_sl_type=tp_sl_type,
+            )
+
+            # Шаг 2: Меняем type на MARKET
+            # Безопасно: StarkNet подпись вычисляется из (amount, price, nonce, expiry, ...)
+            # и НЕ включает поле type. Поле type — это только exchange-level метаданные.
+            order = order.model_copy(update={
+                'type': OrderType.MARKET,
+            })
+
+            # Шаг 3: Отправляем через стандартный order management module
+            return await self.orders.place_order(order)
+
+        # Добавляем метод к PerpetualTradingClient
+        PerpetualTradingClient.place_market_order_native = place_market_order_native
+        _market_order_patch_installed = True
+
+        logger.info("SDK market order patch установлен успешно")
+        return True
+
+    except ImportError as e:
+        logger.error(f"Не удалось импортировать SDK модули для market order patch: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Ошибка установки SDK market order patch: {e}")
+        return False

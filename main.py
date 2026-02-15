@@ -41,12 +41,13 @@ logging.getLogger('aiohttp').setLevel(logging.ERROR)
 logging.getLogger('asyncio').setLevel(logging.ERROR)
 
 # ============================================================
-# КРИТИЧНО: Установка SDK proxy patch ДО всех импортов SDK
+# КРИТИЧНО: Установка SDK патчей ДО всех импортов SDK
 # ============================================================
-from modules.helpers.sdk_proxy_patch import install_sdk_proxy_patch
+from modules.helpers.sdk_proxy_patch import install_sdk_proxy_patch, install_sdk_market_order_patch
 
-# Устанавливаем патч один раз при старте приложения
+# Устанавливаем патчи один раз при старте приложения
 _SDK_PATCH_SUCCESS = install_sdk_proxy_patch()
+_SDK_MARKET_PATCH_SUCCESS = install_sdk_market_order_patch()
 
 # ============================================================
 # Импорты модулей бота

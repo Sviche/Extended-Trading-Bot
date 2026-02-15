@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from x10.perpetual.accounts import StarkPerpetualAccount
 from x10.perpetual.configuration import MAINNET_CONFIG, TESTNET_CONFIG
 from x10.perpetual.trading_client import PerpetualTradingClient
-from x10.perpetual.orders import OrderSide, TimeInForce
+from x10.perpetual.orders import OrderSide, TimeInForce, OrderTpslType, OrderTriggerPriceType, OrderPriceType
+from x10.perpetual.order_object import OrderTpslTriggerParam
 from x10.perpetual.order_object_settlement import create_order_settlement_data, SettlementDataCtx
 from x10.perpetual.fees import DEFAULT_FEES
 from x10.utils.nonce import generate_nonce
@@ -32,13 +33,15 @@ from modules.core.logger import setup_logger
 from modules.helpers.market_rules import market_rules
 from modules.helpers.sdk_proxy_patch import (
     install_sdk_proxy_patch,
+    install_sdk_market_order_patch,
     normalize_proxy_url,
     mask_proxy_url
 )
 from settings import TRADING_SETTINGS
 
-# Устанавливаем патч SDK при импорте модуля
+# Устанавливаем патчи SDK при импорте модуля
 _sdk_patch_installed = install_sdk_proxy_patch()
+_sdk_market_patch_installed = install_sdk_market_order_patch()
 
 # ПРИМЕЧАНИЕ: Глобальная блокировка больше не нужна!
 # Каждый клиент теперь использует свою собственную aiohttp сессию с прокси.
@@ -477,13 +480,19 @@ class ExtendedClient:
         market_data_provider,  # MarketDataProvider instance
         reduce_only: bool = False,
         suppress_missing_position_error: bool = False,
-        silent: bool = False
+        silent: bool = False,
+        stop_loss: Optional[OrderTpslTriggerParam] = None,
+        tp_sl_type: Optional[OrderTpslType] = None,
     ) -> Dict[str, Any]:
         """
         Разместить маркет-ордер
 
-        На Extended нет полноценных маркет-ордеров, поэтому используем
-        лимитный ордер с IOC и агрессивной ценой
+        Использует SDK патч для отправки настоящего MARKET ордера:
+        1. Создаёт ордер через SDK с валидной StarkNet подписью
+        2. Меняет type с LIMIT на MARKET (type не входит в подпись)
+        3. Отправляет на биржу с type=MARKET, time_in_force=IOC
+
+        При ошибке автоматически откатывается на старый метод (type=LIMIT, IOC).
 
         Args:
             market: Рынок (например "BTC-USD")
@@ -518,20 +527,51 @@ class ExtendedClient:
 
             if not silent:
                 self.logger.info(
-                    f"{self.account_config.name} | Размещение маркет-ордера: "
+                    f"{self.account_config.name} | Размещение MARKET ордера: "
                     f"{market} {side} {amount} @ ~${price_display:.2f}"
                 )
 
-            # Размещаем как лимитный ордер с IOC
-            placed_order = await self.trading_client.place_order(
-                market_name=market,
-                amount_of_synthetic=amount,
-                price=price,
-                side=order_side,
-                post_only=False,
-                reduce_only=reduce_only,
-                time_in_force=TimeInForce.IOC  # Immediate or Cancel
-            )
+            # Используем нативный MARKET ордер через SDK патч
+            placed_order = None
+
+            if _sdk_market_patch_installed and hasattr(self.trading_client, 'place_market_order_native'):
+                try:
+                    placed_order = await self.trading_client.place_market_order_native(
+                        market_name=market,
+                        amount_of_synthetic=amount,
+                        price=price,
+                        side=order_side,
+                        reduce_only=reduce_only,
+                        stop_loss=stop_loss,
+                        tp_sl_type=tp_sl_type,
+                    )
+                    if not silent:
+                        self.logger.debug(
+                            f"{self.account_config.name} | MARKET ордер отправлен "
+                            f"(type=MARKET, time_in_force=IOC)"
+                        )
+                except Exception as market_err:
+                    # Если MARKET тип не поддерживается биржей — откатываемся
+                    if not silent:
+                        self.logger.warning(
+                            f"{self.account_config.name} | MARKET тип не поддержан, "
+                            f"откат на LIMIT+IOC: {type(market_err).__name__}: {market_err}"
+                        )
+                    placed_order = None
+
+            # Fallback: старый метод (LIMIT + IOC) если MARKET не сработал
+            if placed_order is None:
+                placed_order = await self.trading_client.place_order(
+                    market_name=market,
+                    amount_of_synthetic=amount,
+                    price=price,
+                    side=order_side,
+                    post_only=False,
+                    reduce_only=reduce_only,
+                    time_in_force=TimeInForce.IOC,  # Immediate or Cancel
+                    stop_loss=stop_loss,
+                    tp_sl_type=tp_sl_type,
+                )
 
             # Получаем order_id напрямую из response.data.id
             order_id = placed_order.data.id if hasattr(placed_order, 'data') and hasattr(placed_order.data, 'id') else 'unknown'
@@ -543,7 +583,7 @@ class ExtendedClient:
             if isinstance(order_dict, dict):
                 order_dict['id'] = order_id
 
-            # Не логируем order_id т.к. IOC ордера исполняются мгновенно
+            # Не логируем order_id т.к. маркет-ордера исполняются мгновенно
             # и API не успевает их индексировать (get_order_by_id возвращает 404)
 
             return order_dict
@@ -570,7 +610,9 @@ class ExtendedClient:
         price: Decimal,
         post_only: bool = False,
         reduce_only: bool = False,
-        time_in_force: str = "GTT"
+        time_in_force: str = "GTT",
+        stop_loss: Optional[OrderTpslTriggerParam] = None,
+        tp_sl_type: Optional[OrderTpslType] = None,
     ) -> Dict[str, Any]:
         """
         Разместить лимитный ордер
@@ -602,6 +644,7 @@ class ExtendedClient:
             self.logger.debug(
                 f"Размещение лимит-ордера {self.account_config.name}: "
                 f"{market} {side} {amount} @ {price}"
+                + (f" [SL: trigger={stop_loss.trigger_price}, exec={stop_loss.price}]" if stop_loss else "")
             )
 
             # Используем метод SDK для создания и размещения ордера
@@ -612,7 +655,9 @@ class ExtendedClient:
                 side=order_side,
                 post_only=post_only,
                 reduce_only=reduce_only,
-                time_in_force=tif
+                time_in_force=tif,
+                stop_loss=stop_loss,
+                tp_sl_type=tp_sl_type,
             )
 
             # Получаем order_id напрямую из response.data.id (как в extended_v0.55)
@@ -649,208 +694,25 @@ class ExtendedClient:
         position_size: Optional[Decimal] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Разместить нативный биржевой стоплосс (TPSL POSITION ордер).
+        DEPRECATED: Этот метод использовал неправильный подход (standalone TPSL POSITION).
 
-        Создаёт standalone TPSL ордер на бирже, который срабатывает серверно
-        при достижении trigger price. Не требует клиентского мониторинга.
+        Правильный способ — прикреплять SL к ордеру при создании через параметры
+        stop_loss и tp_sl_type в place_limit_order() / place_market_order().
 
-        Формат TPSL POSITION ордера (из API docs):
-        - type=TPSL, tpSlType=POSITION
-        - top-level qty=0, price=0 (позиция целиком)
-        - settlement только внутри stopLoss trigger
+        SDK не поддерживает POSITION TPSL (NotImplementedError).
+        Вместо этого используется ORDER TPSL, который:
+        - Прикрепляется к ордеру при создании
+        - Использует общий nonce и settlement context
+        - Корректно подписывается StarkNet подписью
 
-        Args:
-            market: Рынок (например "BTC-USD")
-            position_side: Сторона позиции ("LONG" или "SHORT")
-            entry_price: Цена входа (openPrice из позиции)
-            leverage: Плечо позиции
-            sl_percent: % PnL для SL (отрицательное, например Decimal('-70'))
-            position_size: Размер позиции в базовом активе (из position['size'])
-
-        Returns:
-            Dict с данными размещённого ордера или None при ошибке
+        Оставлен для обратной совместимости, всегда возвращает None.
         """
-        await self._ensure_initialized()
-
-        self.logger.info(
-            f"{self.account_config.name} | place_stop_loss вызван: "
-            f"market={market}, side={position_side}, entry={entry_price}, "
-            f"leverage={leverage}, sl%={sl_percent}"
+        self.logger.warning(
+            f"{self.account_config.name} | place_stop_loss DEPRECATED: "
+            f"SL теперь прикрепляется к ордеру при создании через stop_loss параметр. "
+            f"Этот метод не нужен."
         )
-
-        try:
-            from x10.perpetual.orders import (
-                OrderTriggerPriceType, OrderPriceType,
-            )
-            from x10.config import USER_AGENT
-            import json as json_module
-
-            # === 1. Расчёт триггерной и исполнительной цены ===
-            leverage_d = Decimal(str(leverage))
-            abs_sl = abs(sl_percent)
-
-            if position_side == 'LONG':
-                trigger_price = entry_price * (Decimal('1') - abs_sl / (leverage_d * Decimal('100')))
-                sl_side = OrderSide.SELL
-                slippage = Decimal('0.02')  # 2% slippage для LIMIT SL
-                exec_price = trigger_price * (Decimal('1') - slippage)
-            else:
-                trigger_price = entry_price * (Decimal('1') + abs_sl / (leverage_d * Decimal('100')))
-                sl_side = OrderSide.BUY
-                slippage = Decimal('0.02')  # 2% slippage для LIMIT SL
-                exec_price = trigger_price * (Decimal('1') + slippage)
-
-            trigger_price = market_rules.round_price_to_min_change(market, trigger_price)
-            exec_price = market_rules.round_price_to_min_change(market, exec_price)
-
-            # === 2. Получаем Market Model для крипто-подписи ===
-            market_model = self.trading_client._PerpetualTradingClient__markets.get(market)
-            if not market_model:
-                self.logger.error(f"{self.account_config.name} | Market model не найден для {market}")
-                return None
-
-            # Размер для SL settlement — используем РЕАЛЬНЫЙ размер позиции
-            # Для TPSL POSITION exchange валидирует подпись по фактическому размеру
-            if position_size and position_size > 0:
-                sl_synthetic = position_size
-                self.logger.debug(
-                    f"{self.account_config.name} | SL: используем размер позиции = {sl_synthetic}"
-                )
-            else:
-                # Фоллбэк на макс. размер (менее надёжно)
-                max_value = getattr(market_model.trading_config, 'max_market_order_value', None)
-                if not max_value or max_value <= 0:
-                    max_value = Decimal('3000000')
-                sl_synthetic = max_value / exec_price
-                self.logger.warning(
-                    f"{self.account_config.name} | SL: position_size не передан, "
-                    f"используем max_synthetic = {sl_synthetic:.4f}"
-                )
-
-            # === 3. Строим контекст для Stark-подписи ===
-            fees = self.stark_account.trading_fee.get(market, DEFAULT_FEES)
-            nonce = generate_nonce()
-            expire_time = utc_now() + timedelta(days=90)
-
-            ctx = SettlementDataCtx(
-                market=market_model,
-                fees=fees,
-                builder_fee=None,
-                nonce=nonce,
-                collateral_position_id=self.stark_account.vault,
-                expire_time=expire_time,
-                signer=self.stark_account.sign,
-                public_key=self.stark_account.public_key,
-                starknet_domain=self.config.starknet_domain,
-            )
-
-            # === 4. Создаём settlement для SL trigger ===
-            sl_settlement = create_order_settlement_data(
-                side=sl_side,
-                synthetic_amount=sl_synthetic,
-                price=exec_price,
-                ctx=ctx,
-            )
-
-            # === 5. Строим JSON payload напрямую (SDK не поддерживает TPSL POSITION) ===
-            # Формат: qty=0, price=0 на верхнем уровне; settlement только внутри stopLoss
-            sl_settlement_json = sl_settlement.settlement.to_api_request_json()
-            sl_debugging_json = (
-                sl_settlement.debugging_amounts.to_api_request_json()
-                if sl_settlement.debugging_amounts else None
-            )
-
-            order_json = {
-                "id": str(sl_settlement.order_hash),
-                "market": market,
-                "type": "TPSL",
-                "side": sl_side.value,
-                "qty": "0",
-                "price": "0",
-                "reduceOnly": True,
-                "postOnly": False,
-                "timeInForce": "GTT",
-                "expiryEpochMillis": to_epoch_millis(expire_time),
-                "fee": str(fees.taker_fee_rate),
-                "nonce": str(nonce),
-                "tpSlType": "POSITION",
-                "stopLoss": {
-                    "triggerPrice": str(trigger_price),
-                    "triggerPriceType": "LAST",
-                    "price": str(exec_price),
-                    "priceType": "LIMIT",
-                    "settlement": sl_settlement_json,
-                    "debuggingAmounts": sl_debugging_json,
-                },
-            }
-
-            self.logger.info(
-                f"{self.account_config.name} | SL payload: "
-                f"type={order_json['type']}, side={order_json['side']}, "
-                f"trigger={order_json['stopLoss']['triggerPrice']}, "
-                f"exec={order_json['stopLoss']['price']}, "
-                f"market={order_json['market']}, tpSlType={order_json['tpSlType']}"
-            )
-            self.logger.debug(
-                f"{self.account_config.name} | SL full payload: "
-                f"{json_module.dumps(order_json, default=str)[:1500]}"
-            )
-
-            # === 6. Отправляем через HTTP (с таймаутом 30 сек) ===
-            session = await self.trading_client.orders.get_session()
-            url = f"{self.config.api_base_url}/user/order"
-
-            headers = {
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "User-Agent": USER_AGENT,
-                "X-Api-Key": self.stark_account.api_key,
-            }
-
-            sl_timeout = aiohttp.ClientTimeout(total=30)
-            try:
-                async with session.post(
-                    url, json=order_json, headers=headers, timeout=sl_timeout
-                ) as resp:
-                    resp_text = await resp.text()
-                    self.logger.info(
-                        f"{self.account_config.name} | SL ответ: HTTP {resp.status}, body={resp_text[:500]}"
-                    )
-
-                    if resp.status == 200:
-                        resp_data = json_module.loads(resp_text)
-                        if resp_data.get('status') == 'OK':
-                            order_id = resp_data.get('data', {}).get('id', 'unknown')
-                            self.logger.info(
-                                f"🛡️ {self.account_config.name} | SL установлен: "
-                                f"{market} {position_side} → trigger={trigger_price}, "
-                                f"exec={exec_price}, ID={order_id}"
-                            )
-                            return resp_data
-                        else:
-                            error = resp_data.get('error', resp_text)
-                            self.logger.error(
-                                f"{self.account_config.name} | SL ордер отклонён: {error}"
-                            )
-                            return None
-                    else:
-                        self.logger.error(
-                            f"{self.account_config.name} | SL HTTP ошибка {resp.status}: {resp_text[:500]}"
-                        )
-                        return None
-            except asyncio.TimeoutError:
-                self.logger.error(
-                    f"{self.account_config.name} | SL HTTP таймаут (30с) — пропуск, "
-                    "клиентский мониторинг SL продолжит работу"
-                )
-                return None
-
-        except Exception as e:
-            self.logger.error(
-                f"{self.account_config.name} | Ошибка размещения SL: {type(e).__name__}: {e}"
-            )
-            self.logger.debug(f"Traceback: {traceback.format_exc()}")
-            return None
+        return None
 
     async def get_open_orders(self, market: str = None, market_data_provider=None) -> List[Dict[str, Any]]:
         """
