@@ -83,6 +83,22 @@ class MarketRulesHelper:
             return rules['group']
         return None
 
+    def is_tradfi_market(self, market: str) -> bool:
+        """
+        Проверить, является ли маркет TradFi активом (group 5).
+
+        TradFi активы (XAU, XAG, EUR, XCU, XNG, XPT, XBR, SPX500m, TECH100m и др.)
+        имеют особые требования API — например, trigger_price_type должен быть MARK.
+
+        Args:
+            market: Тикер монеты (например, 'XAU', 'XAG', 'EUR')
+
+        Returns:
+            True если маркет из группы 5 (TradFi / Commodities / Forex)
+        """
+        group = self.get_group(market)
+        return group == 5
+
     def is_market_supported(self, market: str) -> bool:
         """
         Проверить, поддерживается ли монета

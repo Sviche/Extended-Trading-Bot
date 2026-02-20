@@ -669,9 +669,17 @@ class BatchTrader:
             f"trigger={trigger_price}, exec={exec_price}"
         )
 
+        # TradFi активы (group 5: XAU, XAG, EUR и др.) требуют MARK trigger price
+        # API возвращает ошибку 1149 "Non-mark trigger price on TradFi asset is not allowed"
+        market_short = market.replace('-USD', '')
+        if market_rules.is_tradfi_market(market_short):
+            trigger_type = OrderTriggerPriceType.MARK
+        else:
+            trigger_type = OrderTriggerPriceType.LAST
+
         return OrderTpslTriggerParam(
             trigger_price=trigger_price,
-            trigger_price_type=OrderTriggerPriceType.LAST,
+            trigger_price_type=trigger_type,
             price=exec_price,
             price_type=OrderPriceType.LIMIT,
         )
